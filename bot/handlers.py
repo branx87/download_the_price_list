@@ -166,15 +166,21 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=str(settings.PROJECT_ROOT)
+                cwd=str(settings.PROJECT_ROOT),
+                encoding='utf-8',
+                errors='replace'
             )
 
-            sync_status['last_stdout'] = result.stdout
-            sync_status['last_stderr'] = result.stderr
+            # Проверяем, что stdout/stderr не None
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
+
+            sync_status['last_stdout'] = stdout
+            sync_status['last_stderr'] = stderr
             sync_status['last_returncode'] = result.returncode
 
             if result.returncode == 0:
-                output = result.stdout + result.stderr
+                output = stdout + stderr
                 
                 # # Добавь логирование полного вывода для DKC
                 # if vendor == 'DKC':

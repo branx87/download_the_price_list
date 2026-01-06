@@ -13,6 +13,13 @@ class PriceChange:
     old_price: Decimal
     new_price: Decimal
 
+    def __post_init__(self):
+        """Приводим цены к Decimal для корректных вычислений"""
+        if not isinstance(self.old_price, Decimal):
+            self.old_price = Decimal(str(self.old_price))
+        if not isinstance(self.new_price, Decimal):
+            self.new_price = Decimal(str(self.new_price))
+
     @property
     def price_diff(self) -> Decimal:
         """Абсолютная разница в цене"""
