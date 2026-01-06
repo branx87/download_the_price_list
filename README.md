@@ -134,6 +134,20 @@ DKC_PASSWORD=твой_пароль
 - Проверь BOT_TOKEN в .env
 - Убедись что run_bot.py запущен
 
+**Ошибка ConnectTimeout / TimedOut:**
+Это означает, что Telegram API недоступен (возможно, заблокирован в вашей сети).
+
+**Решение 1: Использовать прокси**
+Добавь в .env файл:
+```env
+PROXY_URL=socks5://your_proxy_host:port
+# Или с авторизацией:
+PROXY_URL=socks5://user:pass@host:port
+```
+
+**Решение 2: Использовать VPN**
+Включи VPN перед запуском бота
+
 **Ошибка модуля:**
 ```bash
 pip install python-telegram-bot

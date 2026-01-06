@@ -38,8 +38,27 @@ def main():
         print("="*60 + "\n")
         return
 
-    # Создаем приложение
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Создаем приложение с увеличенными таймаутами и поддержкой прокси
+    builder = Application.builder().token(BOT_TOKEN)
+
+    # Настройка таймаутов
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0
+    )
+    builder.request(request)
+
+    # Если есть прокси в .env, используем его
+    proxy_url = os.getenv('PROXY_URL', '')
+    if proxy_url:
+        builder.proxy_url(proxy_url)
+        print(f"🔄 Используется прокси: {proxy_url}")
+
+    app = builder.build()
 
     # Регистрируем обработчики команд
     app.add_handler(CommandHandler("start", start_command))
