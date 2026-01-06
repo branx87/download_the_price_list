@@ -92,6 +92,10 @@ class SyncService:
                 for art in disappeared_articles
             ]
 
+            # Debug: логируем статистику
+            logger.info(f"📊 Статистика артикулов: БД={len(current_articles)}, "
+                       f"Файл={len(new_articles)}, Исчезло={len(disappeared_articles)}")
+
             # Обновленные позиции (изменилась цена, и новая цена > 0)
             to_update = []
             for article in (new_articles_with_price & current_articles):

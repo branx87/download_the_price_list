@@ -146,7 +146,7 @@ class SqlRepository(IRepository):
                             Vendor = :new_vendor,
                             Status = 'price_changed',
                             updated_at = :updated_at
-                        WHERE Vendor = :old_vendor AND Part_Num = :article
+                        WHERE Vendor = :old_vendor AND TRIM(Part_Num) = :article
                     """)
 
                     result = session.execute(query, {
@@ -192,7 +192,7 @@ class SqlRepository(IRepository):
                     UPDATE Total_Price
                     SET Status = 'disappeared',
                         updated_at = :updated_at
-                    WHERE Vendor IN ({placeholders}) AND Part_Num = :article
+                    WHERE Vendor IN ({placeholders}) AND TRIM(Part_Num) = :article
                 """)
 
                 # Формируем параметры
@@ -202,6 +202,10 @@ class SqlRepository(IRepository):
 
                 result = session.execute(query, params)
                 updated_count += result.rowcount
+
+                # Debug: логируем первые неудачные обновления
+                if result.rowcount == 0 and updated_count < 5:
+                    logger.warning(f"⚠️ Не найден для пометки disappeared: {article}")
 
             session.commit()
             return updated_count
