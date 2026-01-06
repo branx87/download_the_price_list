@@ -122,7 +122,7 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             # Увеличенный таймаут для медленных вендоров
-            timeout = 600 if vendor in ['EKF', 'IEK', 'OWEN'] else 300
+            timeout = 600  # Все вендоры - 10 мин (БД большая)
 
             result = subprocess.run(
                 [settings.PYTHON_PATH, 'main.py', vendor],
@@ -259,7 +259,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             # Увеличенный таймаут для медленных вендоров
-            timeout = 600 if vendor in ['EKF', 'IEK', 'OWEN'] else 300
+            timeout = 600  # Все вендоры - 10 мин (БД большая)
 
             result = subprocess.run(
                 [settings.PYTHON_PATH, 'main.py', vendor],
