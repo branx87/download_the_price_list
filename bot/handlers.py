@@ -121,11 +121,14 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"🔄 {i}/{len(vendors)}: {vendor}")
 
         try:
+            # Увеличенный таймаут для медленных вендоров
+            timeout = 600 if vendor in ['EKF', 'IEK', 'OWEN'] else 300
+
             result = subprocess.run(
                 [settings.PYTHON_PATH, 'main.py', vendor],
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
                 cwd=str(settings.PROJECT_ROOT)
             )
 
@@ -255,11 +258,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"🚀 Синхронизация {vendor}...")
 
         try:
+            # Увеличенный таймаут для медленных вендоров
+            timeout = 600 if vendor in ['EKF', 'IEK', 'OWEN'] else 300
+
             result = subprocess.run(
                 [settings.PYTHON_PATH, 'main.py', vendor],
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
                 cwd=str(PROJECT_ROOT),
                 encoding='utf-8',
                 errors='replace'

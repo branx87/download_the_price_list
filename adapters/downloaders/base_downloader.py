@@ -5,6 +5,7 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 
 from domain.interfaces.downloader import IDownloader
+from utils.file_storage import PriceFileStorage
 
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ class BaseDownloader(IDownloader, ABC):
 
     def __init__(self, download_dir: Path):
         self.download_dir = download_dir
-        self.download_dir.mkdir(exist_ok=True, parents=True)
+        self.storage = PriceFileStorage(download_dir)
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -44,9 +45,7 @@ class BaseDownloader(IDownloader, ABC):
 
     def _download_file(self, url: str, vendor: str) -> Path:
         """Загружает файл по URL"""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-        filename = f"{vendor}_price_{timestamp}.xlsx"
-        file_path = self.download_dir / filename
+        file_path = self.storage.get_storage_path(vendor)
 
         response = self.session.get(url, stream=True, timeout=60)
         response.raise_for_status()
@@ -54,6 +53,9 @@ class BaseDownloader(IDownloader, ABC):
         with open(file_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+
+        # Очищаем старые месяцы (храним последние 3 месяца)
+        self.storage.cleanup_old_months(vendor, keep_months=3)
 
         return file_path
 
