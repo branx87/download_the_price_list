@@ -16,7 +16,10 @@ class SqlRepository(IRepository):
     """Репозиторий для работы с SQL БД через SQLAlchemy"""
 
     def __init__(self, database_url: str):
-        self.engine = create_engine(database_url)
+        # Добавляем таймаут для SQLite
+        if 'sqlite' in database_url:
+            database_url = database_url.replace('sqlite:///', 'sqlite:///') + '?timeout=30'
+        self.engine = create_engine(database_url, connect_args={'timeout': 30} if 'sqlite' in database_url else {})
         self.SessionLocal = sessionmaker(bind=self.engine)
 
     def get_current_articles(self, vendor: str) -> Set[str]:
