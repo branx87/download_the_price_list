@@ -122,11 +122,11 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             result = subprocess.run(
-                ['python', 'main.py', vendor],
+                [settings.PYTHON_PATH, 'main.py', vendor],
                 capture_output=True,
                 text=True,
                 timeout=300,
-                cwd=str(settings.PROJECT_ROOT)  # Используем из settings
+                cwd=str(settings.PROJECT_ROOT)
             )
 
             sync_status['last_stdout'] = result.stdout
@@ -256,7 +256,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             result = subprocess.run(
-                ['python', 'main.py', vendor],
+                [settings.PYTHON_PATH, 'main.py', vendor],
                 capture_output=True,
                 text=True,
                 timeout=300,
