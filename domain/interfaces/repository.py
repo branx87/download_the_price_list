@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import List, Set
+from typing import List, Set, Optional
+from datetime import datetime
 from domain.entities.price_item import PriceItem
 
 
@@ -34,4 +35,9 @@ class IRepository(ABC):
     @abstractmethod
     def delete_old_disappeared(self, vendor: str, days: int = 30) -> int:
         """Удалить старые исчезнувшие позиции"""
+        pass
+
+    @abstractmethod
+    def get_vendor_last_update(self, vendor: str) -> Optional[datetime]:
+        """Получить дату последнего обновления вендора"""
         pass

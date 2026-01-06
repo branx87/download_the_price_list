@@ -5,6 +5,7 @@ from pathlib import Path
 
 from domain.entities.price_item import PriceItem
 from domain.entities.sync_result import SyncResult
+from domain.entities.price_comparison import PriceComparisonResult, PriceChange
 from domain.interfaces.downloader import IDownloader
 from domain.interfaces.parser import IParser
 from domain.interfaces.repository import IRepository
@@ -156,3 +157,75 @@ class SyncService:
             result = self.sync_vendor(vendor)
             results.append(result)
         return results
+
+    def check_price_changes(self, vendor: str) -> PriceComparisonResult:
+        """
+        Проверяет изменения в прайс-листе без обновления БД.
+
+        Args:
+            vendor: Название вендора
+
+        Returns:
+            PriceComparisonResult: Результат сравнения цен
+        """
+        result = PriceComparisonResult(vendor=vendor)
+
+        try:
+            logger.info(f"Проверка актуальности прайса {vendor}")
+
+            # 1. Загружаем и парсим новый файл
+            file_path = self.downloader.download(vendor)
+            new_items = self.parser.parse(file_path, vendor)
+            result.total_in_file = len(new_items)
+
+            # 2. Получаем текущие данные из БД
+            current_items = self.repository.get_items_by_vendor(vendor)
+            result.total_in_db = len(current_items)
+            result.last_db_update = self.repository.get_vendor_last_update(vendor)
+
+            # 3. Создаем словари для быстрого поиска
+            current_items_map = {item.article: item for item in current_items}
+            new_items_map = {item.article: item for item in new_items}
+
+            # Фильтруем позиции с ценой > 0
+            new_items_with_price = [item for item in new_items if float(item.price) > 0]
+            new_items_with_price_map = {item.article: item for item in new_items_with_price}
+
+            current_articles = set(current_items_map.keys())
+            new_articles_with_price = set(new_items_with_price_map.keys())
+            new_articles = set(new_items_map.keys())
+
+            # 4. Анализируем новые позиции
+            new_articles_set = new_articles_with_price - current_articles
+            result.new_items = [new_items_with_price_map[art] for art in new_articles_set]
+            result.new_items_count = len(result.new_items)
+
+            # 5. Анализируем исчезнувшие позиции
+            disappeared_articles = current_articles - new_articles
+            result.disappeared_items = [current_items_map[art] for art in disappeared_articles]
+            result.disappeared_items_count = len(result.disappeared_items)
+
+            # 6. Анализируем изменения цен
+            for article in (new_articles_with_price & current_articles):
+                new_item = new_items_with_price_map[article]
+                old_item = current_items_map[article]
+
+                if new_item.has_price_changed(old_item, self.price_change_threshold):
+                    price_change = PriceChange(
+                        article=article,
+                        description=new_item.description,
+                        old_price=old_item.price,
+                        new_price=new_item.price
+                    )
+                    result.price_changes.append(price_change)
+
+            result.updated_items_count = len(result.price_changes)
+
+            logger.info(f"Проверка завершена: новых={result.new_items_count}, "
+                       f"изменений={result.updated_items_count}, "
+                       f"исчезло={result.disappeared_items_count}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при проверке {vendor}: {e}", exc_info=True)
+
+        return result

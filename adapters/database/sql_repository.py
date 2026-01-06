@@ -1,5 +1,5 @@
 import logging
-from typing import List, Set
+from typing import List, Set, Optional
 from datetime import datetime, timedelta
 from decimal import Decimal
 from sqlalchemy import create_engine, text
@@ -233,3 +233,30 @@ class SqlRepository(IRepository):
         with self.SessionLocal() as session:
             session.execute(query, params)
             session.commit()
+
+    def get_vendor_last_update(self, vendor: str) -> Optional[datetime]:
+        """Получить дату последнего обновления вендора"""
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+
+        # Для OWEN ищем также по старому названию "ОВЕН"
+        vendor_variants = [vendor_normalized]
+        if vendor_normalized == 'OWEN':
+            vendor_variants.append('ОВЕН')
+
+        with self.SessionLocal() as session:
+            placeholders = ', '.join([f':vendor{i}' for i in range(len(vendor_variants))])
+            query = text(f"""
+                SELECT MAX(updated_at)
+                FROM Total_Price
+                WHERE Vendor IN ({placeholders})
+            """)
+
+            params = {f'vendor{i}': v for i, v in enumerate(vendor_variants)}
+            result = session.execute(query, params).fetchone()
+
+            if result and result[0]:
+                # Преобразуем строку в datetime, если нужно
+                if isinstance(result[0], str):
+                    return datetime.fromisoformat(result[0])
+                return result[0]
+            return None

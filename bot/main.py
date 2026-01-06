@@ -13,6 +13,7 @@ from bot.handlers import (
     start_command,
     sync_command,
     sync_all_command,
+    check_command,
     status_command,
     vendors_command,
     help_command,
@@ -64,6 +65,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("sync", sync_command))
     app.add_handler(CommandHandler("sync_all", sync_all_command))
+    app.add_handler(CommandHandler("check", check_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("vendors", vendors_command))
     app.add_handler(CommandHandler("help", help_command))

@@ -6,6 +6,11 @@ import subprocess
 from pathlib import Path
 import re
 from config.settings import settings
+from utils.normalizer import ArticleNormalizer
+from vendors.registry import VendorRegistry
+from adapters.database.sql_repository import SqlRepository
+from domain.services.sync_service import SyncService
+from domain.services.report_service import ReportService
 
 
 
@@ -20,6 +25,27 @@ sync_status = {
 }
 
 
+def create_sync_service(vendor: str) -> SyncService:
+    """Создает сервис синхронизации для проверки изменений"""
+    normalizer = ArticleNormalizer()
+    registry = VendorRegistry(settings.PRICE_FILES_DIR, normalizer)
+    repository = SqlRepository(settings.DATABASE_URL)
+    report_service = ReportService(settings.PROJECT_ROOT / "reports")
+
+    downloader = registry.create_downloader(vendor)
+    parser = registry.create_parser(vendor)
+
+    service = SyncService(
+        downloader=downloader,
+        parser=parser,
+        repository=repository,
+        price_change_threshold=settings.PRICE_CHANGE_THRESHOLD,
+        report_service=report_service
+    )
+
+    return service
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     user = update.effective_user
@@ -30,6 +56,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 /sync - Синхронизировать вендора
 /sync_all - Синхронизировать всех
+/check - Проверить актуальность прайсов
 /status - Статус
 /debug - Показать ошибки
 /help - Справка"""
@@ -44,7 +71,17 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"🔄 {v}", callback_data=f"sync_{v}")] for v in vendors]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text("📋 Выберите вендора:", reply_markup=reply_markup)
+    await update.message.reply_text("📋 Выберите вендора для синхронизации:", reply_markup=reply_markup)
+
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /check - проверка актуальности прайсов"""
+    vendors = ['KEAZ', 'OWEN', 'EKF', 'IEK', 'DKC', 'CHINT']
+
+    keyboard = [[InlineKeyboardButton(f"🔍 {v}", callback_data=f"check_{v}")] for v in vendors]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text("📋 Выберите вендора для проверки:", reply_markup=reply_markup)
 
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -233,9 +270,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 /sync - Синхронизировать вендора
 /sync_all - Синхронизировать всех
+/check - Проверить актуальность прайсов
 /status - Статус синхронизаций
 /debug - Показать ошибки
-/help - Справка"""
+/help - Справка
+
+💡 Используйте /check чтобы посмотреть какие изменения будут при синхронизации"""
 
     await update.message.reply_text(text)
 
@@ -245,7 +285,70 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data.startswith('sync_'):
+    if query.data.startswith('check_'):
+        vendor = query.data.replace('check_', '')
+
+        await query.edit_message_text(f"🔍 Проверяю актуальность {vendor}...")
+
+        try:
+            service = create_sync_service(vendor)
+            result = service.check_price_changes(vendor)
+
+            # Формируем отчет
+            report_lines = [f"📊 Проверка {vendor}:"]
+
+            if result.last_db_update:
+                days_ago = (datetime.now() - result.last_db_update).days
+                report_lines.append(f"\n⏰ Последнее обновление: {result.last_db_update.strftime('%d.%m.%Y %H:%M')}")
+                report_lines.append(f"   ({days_ago} дн. назад)")
+
+            report_lines.append(f"\n📦 В БД: {result.total_in_db}")
+            report_lines.append(f"📥 В файле: {result.total_in_file}")
+
+            if not result.has_changes:
+                report_lines.append("\n✅ Изменений нет, прайс актуален")
+            else:
+                report_lines.append(f"\n⚠️ Обнаружены изменения:")
+
+                if result.new_items_count > 0:
+                    report_lines.append(f"\n➕ Новых позиций: {result.new_items_count}")
+
+                if result.updated_items_count > 0:
+                    report_lines.append(f"\n🔄 Изменений цен: {result.updated_items_count}")
+
+                    if result.avg_price_change_percent != 0:
+                        report_lines.append(f"   Средн. изменение: {result.avg_price_change_percent:+.1f}%")
+
+                    max_increase = result.max_price_increase
+                    if max_increase:
+                        report_lines.append(f"   Макс. рост: {max_increase.price_diff_percent:+.1f}%")
+                        report_lines.append(f"   ({max_increase.article})")
+
+                    max_decrease = result.max_price_decrease
+                    if max_decrease:
+                        report_lines.append(f"   Макс. снижение: {max_decrease.price_diff_percent:+.1f}%")
+                        report_lines.append(f"   ({max_decrease.article})")
+
+                if result.disappeared_items_count > 0:
+                    report_lines.append(f"\n👻 Исчезло позиций: {result.disappeared_items_count}")
+
+                report_lines.append(f"\n💡 Используйте /sync для обновления")
+
+            report = "\n".join(report_lines)
+
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=report
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка проверки {vendor}: {e}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"❌ Ошибка при проверке {vendor}: {str(e)[:200]}"
+            )
+
+    elif query.data.startswith('sync_'):
         vendor = query.data.replace('sync_', '')
 
         if sync_status['is_running']:
