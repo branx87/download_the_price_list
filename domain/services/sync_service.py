@@ -1,0 +1,134 @@
+import logging
+from typing import List
+from datetime import datetime
+
+from domain.entities.price_item import PriceItem
+from domain.entities.sync_result import SyncResult
+from domain.interfaces.downloader import IDownloader
+from domain.interfaces.parser import IParser
+from domain.interfaces.repository import IRepository
+
+
+logger = logging.getLogger(__name__)
+
+
+class SyncService:
+    """
+    Сервис синхронизации прайс-листов.
+
+    Принцип работы:
+    1. Загружает файл через IDownloader
+    2. Парсит файл через IParser
+    3. Сравнивает с текущими данными из IRepository
+    4. Обновляет БД через IRepository
+    """
+
+    def __init__(
+        self,
+        downloader: IDownloader,
+        parser: IParser,
+        repository: IRepository,
+        price_change_threshold: float = 0.01
+    ):
+        self.downloader = downloader
+        self.parser = parser
+        self.repository = repository
+        self.price_change_threshold = price_change_threshold
+
+    def sync_vendor(self, vendor: str) -> SyncResult:
+        """
+        Синхронизирует прайс-лист одного вендора.
+
+        Args:
+            vendor: Название вендора
+
+        Returns:
+            SyncResult: Результат синхронизации
+        """
+        result = SyncResult(vendor=vendor, success=False)
+
+        try:
+            logger.info(f"🚀 Начинаем синхронизацию {vendor}")
+
+            # 1. Загружаем файл
+            file_path = self.downloader.download(vendor)
+            result.file_path = str(file_path)
+            logger.info(f"📥 Файл загружен: {file_path.name}")
+
+            # 2. Парсим файл
+            new_items = self.parser.parse(file_path, vendor)
+            result.total_items = len(new_items)
+            logger.info(f"📊 Распарсено {len(new_items)} позиций")
+
+            # 3. Получаем текущие данные из БД
+            current_items = self.repository.get_items_by_vendor(vendor)
+            current_articles = {item.article for item in current_items}
+            current_items_map = {item.article: item for item in current_items}
+
+            # 4. Анализируем изменения
+            new_items_map = {item.article: item for item in new_items}
+            new_articles = set(new_items_map.keys())
+
+            # Новые позиции (есть в файле, нет в БД)
+            to_add = [
+                new_items_map[art] 
+                for art in (new_articles - current_articles)
+            ]
+
+            # Исчезнувшие позиции (есть в БД, нет в файле)
+            disappeared = list(current_articles - new_articles)
+
+            # Обновленные позиции (изменилась цена)
+            to_update = []
+            for article in (new_articles & current_articles):
+                new_item = new_items_map[article]
+                old_item = current_items_map[article]
+                if new_item.has_price_changed(old_item, self.price_change_threshold):
+                    to_update.append(new_item)
+
+            # 5. Применяем изменения
+            if to_add:
+                added = self.repository.add_items(to_add)
+                result.new_items = added
+                logger.info(f"➕ Добавлено новых: {added}")
+
+            if to_update:
+                updated = self.repository.update_items(to_update)
+                result.updated_items = updated
+                logger.info(f"🔄 Обновлено цен: {updated}")
+
+            if disappeared:
+                marked = self.repository.mark_as_disappeared(vendor, disappeared)
+                result.disappeared_items = marked
+                logger.info(f"👻 Помечено исчезнувших: {marked}")
+
+            # 6. Очищаем старые исчезнувшие
+            self.repository.delete_old_disappeared(vendor, days=30)
+
+            result.success = True
+            logger.info(f"✅ Синхронизация {vendor} завершена успешно")
+
+        except Exception as e:
+            result.error_message = str(e)
+            logger.error(f"❌ Ошибка синхронизации {vendor}: {e}", exc_info=True)
+
+        finally:
+            result.finished_at = datetime.now()
+
+        return result
+
+    def sync_all_vendors(self, vendors: List[str]) -> List[SyncResult]:
+        """
+        Синхронизирует все вендоры.
+
+        Args:
+            vendors: Список названий вендоров
+
+        Returns:
+            List[SyncResult]: Результаты синхронизации
+        """
+        results = []
+        for vendor in vendors:
+            result = self.sync_vendor(vendor)
+            results.append(result)
+        return results
