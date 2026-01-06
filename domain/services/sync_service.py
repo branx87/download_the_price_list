@@ -219,6 +219,12 @@ class SyncService:
                     )
                     result.price_changes.append(price_change)
 
+                    # Логируем первые 3 изменения для отладки
+                    if len(result.price_changes) <= 3:
+                        logger.debug(f"Изменение цены: {article} | "
+                                   f"old={old_item.price} | new={new_item.price} | "
+                                   f"diff={price_change.price_diff_percent:.1f}%")
+
             result.updated_items_count = len(result.price_changes)
 
             logger.info(f"Проверка завершена: новых={result.new_items_count}, "
