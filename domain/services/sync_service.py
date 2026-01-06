@@ -1,12 +1,14 @@
 import logging
-from typing import List
+from typing import List, Optional
 from datetime import datetime
+from pathlib import Path
 
 from domain.entities.price_item import PriceItem
 from domain.entities.sync_result import SyncResult
 from domain.interfaces.downloader import IDownloader
 from domain.interfaces.parser import IParser
 from domain.interfaces.repository import IRepository
+from domain.services.report_service import ReportService
 
 
 logger = logging.getLogger(__name__)
@@ -28,12 +30,14 @@ class SyncService:
         downloader: IDownloader,
         parser: IParser,
         repository: IRepository,
-        price_change_threshold: float = 0.01
+        price_change_threshold: float = 0.01,
+        report_service: Optional[ReportService] = None
     ):
         self.downloader = downloader
         self.parser = parser
         self.repository = repository
         self.price_change_threshold = price_change_threshold
+        self.report_service = report_service
 
     def sync_vendor(self, vendor: str) -> SyncResult:
         """
@@ -76,7 +80,11 @@ class SyncService:
             ]
 
             # Исчезнувшие позиции (есть в БД, нет в файле)
-            disappeared = list(current_articles - new_articles)
+            disappeared_articles = list(current_articles - new_articles)
+            disappeared_items = [
+                current_items_map[art]
+                for art in disappeared_articles
+            ]
 
             # Обновленные позиции (изменилась цена)
             to_update = []
@@ -90,20 +98,31 @@ class SyncService:
             if to_add:
                 added = self.repository.add_items(to_add)
                 result.new_items = added
+                result.added_items = to_add
                 logger.info(f"➕ Добавлено новых: {added}")
 
             if to_update:
                 updated = self.repository.update_items(to_update)
                 result.updated_items = updated
+                result.updated_items_list = to_update
                 logger.info(f"🔄 Обновлено цен: {updated}")
 
-            if disappeared:
-                marked = self.repository.mark_as_disappeared(vendor, disappeared)
+            if disappeared_articles:
+                marked = self.repository.mark_as_disappeared(vendor, disappeared_articles)
                 result.disappeared_items = marked
+                result.disappeared_items_list = disappeared_items
                 logger.info(f"👻 Помечено исчезнувших: {marked}")
 
             # 6. Очищаем старые исчезнувшие
             self.repository.delete_old_disappeared(vendor, days=30)
+
+            # 7. Создаем Excel отчет
+            if self.report_service and result.changes_count > 0:
+                try:
+                    report_path = self.report_service.create_report(vendor, result)
+                    logger.info(f"📊 Отчет создан: {report_path.name}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось создать отчет: {e}")
 
             result.success = True
             logger.info(f"✅ Синхронизация {vendor} завершена успешно")

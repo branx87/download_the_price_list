@@ -165,34 +165,30 @@ class DkcDownloader(BaseDownloader):
                             raise Exception("Excel файл не найден в архиве")
                         
                         excel_data = zip_ref.read(excel_files[0])
-                        
+
                         # Сохраняем Excel
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-                        ext = Path(excel_files[0]).suffix
-                        filename = f"DKC_price_{timestamp}{ext}"
-                        file_path = self.download_dir / filename
-                        
+                        file_path = self.storage.get_storage_path(vendor)
                         file_path.write_bytes(excel_data)
                         file_size = len(excel_data)
-                        
-                        logger.info(f"DKC: Файл загружен из архива: {filename} ({file_size//1024} KB)")
+
+                        logger.info(f"DKC: Файл загружен из архива: {file_path.name} ({file_size//1024} KB)")
+                        self.storage.cleanup_old_months(vendor, keep_months=3)
                         return file_path
             else:
                 # Прямая загрузка Excel
                 logger.info(f"DKC: Прямая загрузка Excel: {excel_link}")
                 response = session.get(excel_link, stream=True, timeout=120)
                 response.raise_for_status()
-                
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-                filename = f"DKC_price_{timestamp}.xlsx"
-                file_path = self.download_dir / filename
-                
+
+                file_path = self.storage.get_storage_path(vendor)
+
                 with open(file_path, 'wb') as f:
                     for chunk in response.iter_content(1024):
                         f.write(chunk)
-                
+
                 file_size = file_path.stat().st_size
-                logger.info(f"DKC: Файл загружен: {filename} ({file_size//1024} KB)")
+                logger.info(f"DKC: Файл загружен: {file_path.name} ({file_size//1024} KB)")
+                self.storage.cleanup_old_months(vendor, keep_months=3)
                 return file_path
                 
         except Exception as e:

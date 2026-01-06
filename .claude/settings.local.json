@@ -12,7 +12,11 @@
       "Bash(git commit:*)",
       "Bash(git remote add:*)",
       "Bash(git push:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(dir:*)",
+      "Bash(python main.py:*)",
+      "Bash(d:\\\\projects\\\\price_sync_bot\\\\venv\\\\Scripts\\\\python.exe:*)",
+      "Bash(./venv/Scripts/python.exe:*)"
     ]
   }
 }

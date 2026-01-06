@@ -8,6 +8,7 @@ from utils.normalizer import ArticleNormalizer
 from vendors.registry import VendorRegistry
 from adapters.database.sql_repository import SqlRepository
 from domain.services.sync_service import SyncService
+from domain.services.report_service import ReportService
 
 
 # Для Windows консоли - настраиваем ДО basicConfig
@@ -39,6 +40,7 @@ def create_sync_service(vendor: str) -> SyncService:
     normalizer = ArticleNormalizer()
     registry = VendorRegistry(settings.PRICE_FILES_DIR, normalizer)
     repository = SqlRepository(settings.DATABASE_URL)
+    report_service = ReportService(settings.PROJECT_ROOT / "reports")
 
     # 2. Создаем компоненты для конкретного вендора
     downloader = registry.create_downloader(vendor)
@@ -49,7 +51,8 @@ def create_sync_service(vendor: str) -> SyncService:
         downloader=downloader,
         parser=parser,
         repository=repository,
-        price_change_threshold=settings.PRICE_CHANGE_THRESHOLD
+        price_change_threshold=settings.PRICE_CHANGE_THRESHOLD,
+        report_service=report_service
     )
 
     return service

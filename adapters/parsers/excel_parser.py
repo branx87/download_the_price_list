@@ -8,6 +8,7 @@ import re
 from domain.interfaces.parser import IParser
 from domain.entities.price_item import PriceItem
 from utils.normalizer import ArticleNormalizer
+from domain.services.data_normalizer import DataNormalizer
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class ExcelParser(IParser):
     def __init__(self, config: Dict[str, Any], normalizer: ArticleNormalizer):
         self.config = config
         self.normalizer = normalizer
+        self.data_normalizer = DataNormalizer()
 
     def parse(self, file_path: Path, vendor: str) -> List[PriceItem]:
         """Парсит Excel файл в список PriceItem"""
@@ -42,22 +44,43 @@ class ExcelParser(IParser):
                 # IEK: строка 5 - основные заголовки, строка 6 - подзаголовки
                 header_main = df.iloc[5].fillna('').astype(str)
                 header_sub = df.iloc[6].fillna('').astype(str)
-                
-                # Объединяем заголовки
+
+                # Умное объединение заголовков:
+                # - Для колонок с ценой объединяем (чтобы различать "Базовая цена с НДС", "РОЦ с НДС" и т.д.)
+                # - Если основной заголовок - email или мусор (@ в названии), используем подзаголовок
+                # - Для остальных используем основной заголовок
                 combined_headers = []
                 for i, (main, sub) in enumerate(zip(header_main, header_sub)):
-                    if main and main not in ['nan', '']:
-                        if sub and sub not in ['nan', '']:
-                            combined_headers.append(f"{main} {sub}".strip())
-                        else:
-                            combined_headers.append(main.strip())
+                    main_clean = main.strip() if main and main not in ['nan', ''] else ''
+                    sub_clean = sub.strip() if sub and sub not in ['nan', ''] else ''
+
+                    # Если основной заголовок содержит "цена" - объединяем с подзаголовком
+                    if main_clean and 'цена' in main_clean.lower() and sub_clean:
+                        combined_headers.append(f"{main_clean} {sub_clean}")
+                    # Если основной заголовок содержит @ (email) - используем подзаголовок
+                    elif main_clean and '@' in main_clean and sub_clean:
+                        combined_headers.append(sub_clean)
+                    # Иначе используем основной заголовок (или подзаголовок если основного нет)
+                    elif main_clean:
+                        combined_headers.append(main_clean)
+                    elif sub_clean:
+                        combined_headers.append(sub_clean)
                     else:
-                        combined_headers.append(sub.strip() if sub and sub != 'nan' else f'col_{i}')
-                
+                        combined_headers.append(f'col_{i}')
+
                 df.columns = combined_headers
                 df = df.iloc[7:].reset_index(drop=True)
-                
-                logger.info(f"Колонки IEK после объединения: {list(df.columns)[:10]}")
+
+                logger.info(f"Колонки IEK после объединения (первые 15): {list(df.columns)[:15]}")
+
+                # Ищем колонки содержащие нужные слова для отладки
+                article_candidates = [col for col in df.columns if 'артикул' in str(col).lower()]
+                name_candidates = [col for col in df.columns if 'наименование' in str(col).lower() or 'название' in str(col).lower() or 'товар' in str(col).lower()]
+                price_candidates = [col for col in df.columns if 'цена' in str(col).lower() and 'ндс' in str(col).lower()]
+
+                logger.info(f"IEK - Кандидаты для артикулов: {article_candidates}")
+                logger.info(f"IEK - Кандидаты для наименований: {name_candidates}")
+                logger.info(f"IEK - Кандидаты для цены: {price_candidates}")
             
             # ========================================
             # DKC
@@ -251,6 +274,9 @@ class ExcelParser(IParser):
         """Преобразует DataFrame в список PriceItem"""
         items = []
 
+        # Нормализуем vendor name
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+
         # Получаем маппинг колонок из конфигурации
         columns_config = self.config.get('columns', {})
 
@@ -261,98 +287,95 @@ class ExcelParser(IParser):
         unit_col = columns_config.get('units', 'Ед. Изм.')
 
         logger.info(f"Используем колонки: article={article_col}, price={price_col}")
-        
+
         # Проверяем что колонки существуют
         if article_col not in df.columns:
             logger.error(f"Колонка '{article_col}' не найдена в {df.columns.tolist()}")
             return []
-        
+
         if price_col not in df.columns:
             logger.error(f"Колонка '{price_col}' не найдена в {df.columns.tolist()}")
             return []
-        
+
         # Отладка первых 3 строк
         for idx in range(min(3, len(df))):
             row = df.iloc[idx]
             logger.info(f"DEBUG строка {idx}: article={row[article_col]}, price={row[price_col]}, types: {type(row[article_col])}, {type(row[price_col])}")
-        
-        skip_reasons = {'empty_article': 0, 'empty_price': 0, 'error': 0}
+
+        skip_reasons = {'empty_article': 0, 'empty_price': 0, 'price_on_request': 0, 'error': 0}
         error_messages = []
-        
+
         for idx, row in df.iterrows():
             try:
                 # Извлекаем артикул
                 article = row[article_col]
-                
+
                 # Проверяем что это не Series
                 if isinstance(article, pd.Series):
                     article = article.iloc[0] if len(article) > 0 else None
-                
-                # Преобразуем к строке и проверяем
-                article_str = str(article).strip()
-                
+
+                # Нормализуем артикул (убираем пробелы, uppercase)
+                article_str = self.data_normalizer.normalize_article(str(article) if article else '', vendor_normalized)
+
                 # Проверка пустоты
-                if not article_str or article_str in ['nan', 'None', '']:
+                if not article_str or article_str in ['NAN', 'NONE']:
                     skip_reasons['empty_article'] += 1
                     continue
-                
+
                 # Извлекаем цену
                 price_val = row[price_col]
                 if isinstance(price_val, pd.Series):
                     price_val = price_val.iloc[0] if len(price_val) > 0 else None
-                
-                # Проверяем цену
-                if price_val is None or pd.isna(price_val):
+
+                # Нормализуем и проверяем цену
+                price_cleaned = self.data_normalizer.clean_price_value(price_val)
+
+                # None означает "заказная позиция" - пропускаем
+                if price_cleaned is None:
+                    skip_reasons['price_on_request'] += 1
+                    continue
+
+                # Если цена 0 или пустая - пропускаем
+                if price_cleaned == 0.0:
                     skip_reasons['empty_price'] += 1
                     continue
-                
-                try:
-                    # Если цена - строка с запятой, заменяем на точку
-                    if isinstance(price_val, str):
-                        price_val = price_val.replace(',', '.')
-                    price = float(price_val)
-                except (ValueError, TypeError) as price_error:
-                    skip_reasons['error'] += 1
-                    if len(error_messages) < 5:
-                        error_messages.append(f"idx={idx}, price_error={str(price_error)}")
-                    continue
-                
+
                 # Извлекаем описание
                 description = ''
                 if desc_col in df.columns:
                     desc_val = row[desc_col]
                     if isinstance(desc_val, pd.Series):
                         desc_val = desc_val.iloc[0] if len(desc_val) > 0 else ''
-                    description = str(desc_val).strip() if desc_val and not pd.isna(desc_val) else ''
-                
-                # Извлекаем единицы
+                    description = self.data_normalizer.normalize_description(str(desc_val) if desc_val and not pd.isna(desc_val) else '')
+
+                # Извлекаем и нормализуем единицы измерения
                 unit = 'шт'
                 if unit_col in df.columns:
                     unit_val = row[unit_col]
                     if isinstance(unit_val, pd.Series):
                         unit_val = unit_val.iloc[0] if len(unit_val) > 0 else 'шт'
-                    unit = str(unit_val).strip() if unit_val and not pd.isna(unit_val) else 'шт'
-                
+                    unit = self.data_normalizer.normalize_unit(str(unit_val) if unit_val and not pd.isna(unit_val) else 'шт')
+
                 # Создаем PriceItem
                 item = PriceItem(
-                    vendor=vendor,
+                    vendor=vendor_normalized,
                     article=article_str,
                     description=description,
-                    price=price,
+                    price=price_cleaned,
                     units=unit
                 )
                 items.append(item)
-                
+
             except Exception as e:  # ← ГЛАВНЫЙ EXCEPT
                 skip_reasons['error'] += 1
                 if len(error_messages) < 5:  # ← СОХРАНЯЕМ ОШИБКУ
                     error_messages.append(f"idx={idx}, error={type(e).__name__}: {str(e)}")
                 continue
-        
+
         # ← ВЫВОДИМ ОШИБКИ
         if error_messages:
             logger.error(f"Примеры ошибок при создании PriceItem: {error_messages}")
-        
-        logger.info(f"Пропущено: пустые артикулы={skip_reasons['empty_article']}, пустые цены={skip_reasons['empty_price']}, ошибки={skip_reasons['error']}")
+
+        logger.info(f"Пропущено: пустые артикулы={skip_reasons['empty_article']}, пустые цены={skip_reasons['empty_price']}, заказные={skip_reasons['price_on_request']}, ошибки={skip_reasons['error']}")
         logger.info(f"Преобразовано {len(items)} позиций из {len(df)}")
         return items

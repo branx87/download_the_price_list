@@ -28,16 +28,16 @@ class ChintDownloader(BaseDownloader):
                 response = self.session.get(url, stream=True, timeout=60)
                 
                 if response.status_code == 200:
-                    filename = f"CHINT_price_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-                    filepath = self.download_dir / filename
-                    
+                    filepath = self.storage.get_storage_path(vendor)
+
                     with open(filepath, 'wb') as f:
                         for chunk in response.iter_content(1024):
                             f.write(chunk)
-                    
+
                     file_size = filepath.stat().st_size
                     if file_size > 102400:  # Больше 100KB
-                        logger.info(f"✅ Файл загружен: {filename} ({file_size//1024} KB)")
+                        logger.info(f"✅ Файл загружен: {filepath.name} ({file_size//1024} KB)")
+                        self.storage.cleanup_old_months(vendor, keep_months=3)
                         return filepath
                     else:
                         logger.warning(f"CHINT: файл маленький ({file_size} bytes)")
