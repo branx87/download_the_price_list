@@ -330,13 +330,14 @@ class ExcelParser(IParser):
                 # Нормализуем и проверяем цену
                 price_cleaned = self.data_normalizer.clean_price_value(price_val)
 
-                # None означает "заказная позиция" - пропускаем
+                # None означает "заказная позиция" - ставим цену 0 для учета в синхронизации
                 if price_cleaned is None:
+                    price_cleaned = 0.0
                     skip_reasons['price_on_request'] += 1
-                    continue
+                    # НЕ пропускаем - создаем PriceItem с ценой 0
 
-                # Если цена 0 или пустая - пропускаем
-                if price_cleaned == 0.0:
+                # Если цена пустая (не заказная, а именно пустая) - пропускаем
+                if price_cleaned == 0.0 and not self.data_normalizer.is_price_on_request(str(price_val)):
                     skip_reasons['empty_price'] += 1
                     continue
 

@@ -59,7 +59,10 @@ class PriceFileStorage:
 
     def _cleanup_old_files(self, month_dir: Path, current_timestamp: datetime):
         """
-        Удаляет старые файлы, оставляя только последний в каждом периоде.
+        Удаляет старые файлы, оставляя максимум 3 файла в месяце:
+        - 1 за начало месяца (1-10 число)
+        - 1 за середину (11-20 число)
+        - 1 за конец (21-31 число)
 
         Args:
             month_dir: Директория месяца
@@ -68,21 +71,49 @@ class PriceFileStorage:
         if not month_dir.exists():
             return
 
-        period = self._get_period(current_timestamp.day)
-        files = self._get_period_files(month_dir, period)
+        # Получаем все файлы в папке месяца
+        all_files = list(month_dir.glob('*.xlsx')) + list(month_dir.glob('*.xls'))
+        if not all_files:
+            return
 
-        # Оставляем только последний файл в периоде
-        if len(files) >= self.MAX_FILES_PER_PERIOD:
-            files_to_delete = sorted(files)[:-self.MAX_FILES_PER_PERIOD + 1]
-            for file_path in files_to_delete:
-                logger.info(f"Удаляем старый файл: {file_path.name}")
-                file_path.unlink()
+        # Группируем файлы по периодам
+        periods = {'start': [], 'mid': [], 'end': []}
+
+        for file_path in all_files:
+            file_day = self._extract_day_from_filename(file_path)
+            if file_day:
+                period = self._get_period_v2(file_day)
+                periods[period].append(file_path)
+
+        # Для каждого периода оставляем только последний файл
+        for period, files in periods.items():
+            if len(files) > 1:
+                # Сортируем по времени модификации
+                files_sorted = sorted(files, key=lambda p: p.stat().st_mtime)
+                # Удаляем все кроме последнего
+                for file_path in files_sorted[:-1]:
+                    logger.info(f"Удаляем старый файл ({period}): {file_path.name}")
+                    file_path.unlink()
 
     def _get_period(self, day: int) -> str:
-        """Определяет период месяца по дню."""
+        """Определяет период месяца по дню (старая версия)."""
         if self.PERIOD_START[0] <= day <= self.PERIOD_START[1]:
             return 'start'
         elif self.PERIOD_MID[0] <= day <= self.PERIOD_MID[1]:
+            return 'mid'
+        else:
+            return 'end'
+
+    def _get_period_v2(self, day: int) -> str:
+        """
+        Определяет период месяца по дню (новая версия).
+        - start: 1-10 число
+        - mid: 11-20 число
+        - end: 21-31 число
+        """
+        if 1 <= day <= 10:
+            return 'start'
+        elif 11 <= day <= 20:
             return 'mid'
         else:
             return 'end'

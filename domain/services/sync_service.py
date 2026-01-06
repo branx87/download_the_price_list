@@ -73,23 +73,28 @@ class SyncService:
             new_items_map = {item.article: item for item in new_items}
             new_articles = set(new_items_map.keys())
 
-            # Новые позиции (есть в файле, нет в БД)
+            # Отфильтровываем заказные позиции (с ценой 0) для добавления/обновления
+            new_items_with_price = [item for item in new_items if float(item.price) > 0]
+            new_items_with_price_map = {item.article: item for item in new_items_with_price}
+            new_articles_with_price = set(new_items_with_price_map.keys())
+
+            # Новые позиции (есть в файле, нет в БД, и есть цена)
             to_add = [
-                new_items_map[art] 
-                for art in (new_articles - current_articles)
+                new_items_with_price_map[art]
+                for art in (new_articles_with_price - current_articles)
             ]
 
-            # Исчезнувшие позиции (есть в БД, нет в файле)
+            # Исчезнувшие позиции (есть в БД, нет в файле ВООБЩЕ - даже без цены)
             disappeared_articles = list(current_articles - new_articles)
             disappeared_items = [
                 current_items_map[art]
                 for art in disappeared_articles
             ]
 
-            # Обновленные позиции (изменилась цена)
+            # Обновленные позиции (изменилась цена, и новая цена > 0)
             to_update = []
-            for article in (new_articles & current_articles):
-                new_item = new_items_map[article]
+            for article in (new_articles_with_price & current_articles):
+                new_item = new_items_with_price_map[article]
                 old_item = current_items_map[article]
                 if new_item.has_price_changed(old_item, self.price_change_threshold):
                     to_update.append(new_item)
