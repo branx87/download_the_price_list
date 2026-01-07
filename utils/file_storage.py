@@ -188,3 +188,30 @@ class PriceFileStorage:
             elif item.is_dir():
                 self._remove_directory(item)
         directory.rmdir()
+
+    def get_latest_file(self, vendor: str) -> Path:
+        """
+        Получить последний скачанный файл для вендора.
+
+        Args:
+            vendor: Название вендора
+
+        Returns:
+            Path: Путь к последнему файлу
+
+        Raises:
+            FileNotFoundError: Если файлов для вендора нет
+        """
+        vendor_dir = self.base_dir / vendor
+        if not vendor_dir.exists():
+            raise FileNotFoundError(f"Нет файлов для вендора {vendor}")
+
+        # Получаем все файлы для вендора
+        all_files = list(vendor_dir.rglob('*.xlsx')) + list(vendor_dir.rglob('*.xls'))
+        if not all_files:
+            raise FileNotFoundError(f"Нет файлов для вендора {vendor}")
+
+        # Сортируем по времени модификации и возвращаем последний
+        latest_file = max(all_files, key=lambda p: p.stat().st_mtime)
+        logger.info(f"📂 Использую последний файл {vendor}: {latest_file.name}")
+        return latest_file

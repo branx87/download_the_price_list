@@ -167,12 +167,13 @@ class SyncService:
             results.append(result)
         return results
 
-    def check_price_changes(self, vendor: str) -> PriceComparisonResult:
+    def check_price_changes(self, vendor: str, use_cached: bool = True) -> PriceComparisonResult:
         """
         Проверяет изменения в прайс-листе без обновления БД.
 
         Args:
             vendor: Название вендора
+            use_cached: Использовать последний скачанный файл вместо нового (по умолчанию True)
 
         Returns:
             PriceComparisonResult: Результат сравнения цен
@@ -182,8 +183,22 @@ class SyncService:
         try:
             logger.info(f"Проверка актуальности прайса {vendor}")
 
-            # 1. Загружаем и парсим новый файл
-            file_path = self.downloader.download(vendor)
+            # 1. Загружаем и парсим файл
+            if use_cached:
+                # Используем последний скачанный файл
+                from utils.file_storage import PriceFileStorage
+                from config.settings import settings
+                storage = PriceFileStorage(settings.PRICE_FILES_DIR)
+                try:
+                    file_path = storage.get_latest_file(vendor)
+                    logger.info(f"📂 Проверка по кэшированному файлу")
+                except FileNotFoundError:
+                    logger.warning(f"⚠️ Нет кэшированного файла, скачиваю новый")
+                    file_path = self.downloader.download(vendor)
+            else:
+                # Скачиваем новый файл
+                file_path = self.downloader.download(vendor)
+
             new_items = self.parser.parse(file_path, vendor)
             result.total_in_file = len(new_items)
 
