@@ -185,13 +185,23 @@ class SyncService:
 
             # 1. Загружаем и парсим файл
             if use_cached:
-                # Используем последний скачанный файл
+                # Используем последний скачанный файл если он за сегодня
                 from utils.file_storage import PriceFileStorage
                 from config.settings import settings
+                from datetime import datetime
                 storage = PriceFileStorage(settings.PRICE_FILES_DIR)
                 try:
-                    file_path = storage.get_latest_file(vendor)
-                    logger.info(f"📂 Проверка по кэшированному файлу")
+                    latest_file = storage.get_latest_file(vendor)
+                    # Проверяем дату файла
+                    file_date = datetime.fromtimestamp(latest_file.stat().st_mtime).date()
+                    today = datetime.now().date()
+
+                    if file_date == today:
+                        file_path = latest_file
+                        logger.info(f"📂 Проверка по кэшу (файл за сегодня)")
+                    else:
+                        logger.info(f"⏰ Файл устарел ({file_date}), скачиваю свежий")
+                        file_path = self.downloader.download(vendor)
                 except FileNotFoundError:
                     logger.warning(f"⚠️ Нет кэшированного файла, скачиваю новый")
                     file_path = self.downloader.download(vendor)

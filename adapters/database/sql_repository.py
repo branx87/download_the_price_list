@@ -265,14 +265,16 @@ class SqlRepository(IRepository):
             return result[0] if result else 0
 
     def reset_changed_status(self, vendor: str) -> int:
-        """Сбросить статус price_changed на active после синхронизации"""
+        """Сбросить статус price_changed/new/NULL на active после синхронизации"""
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
         with self.SessionLocal() as session:
             query = text("""
                 UPDATE Total_Price
                 SET Status = 'active'
-                WHERE Vendor = :vendor AND Status = 'price_changed'
+                WHERE Vendor = :vendor
+                AND (Status = 'price_changed' OR Status = 'new' OR Status IS NULL OR Status = 'updated')
+                AND Status != 'disappeared'
             """)
 
             result = session.execute(query, {'vendor': vendor_normalized})
