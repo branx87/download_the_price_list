@@ -63,14 +63,6 @@ class DataNormalizer:
         'liter': 'л',
     }
 
-    # Таблица соответствий vendor names
-    # ВАЖНО: Используем кириллицу 'ОВЕН' для обратной совместимости с БД
-    VENDOR_NAME_MAPPING = {
-        'owen': 'ОВЕН',
-        'овен': 'ОВЕН',
-        'оуэн': 'ОВЕН',
-    }
-
     @staticmethod
     def normalize_article(article: str, vendor: Optional[str] = None) -> str:
         """
@@ -129,24 +121,19 @@ class DataNormalizer:
     @staticmethod
     def normalize_vendor_name(vendor: str) -> str:
         """
-        Нормализует название вендора.
+        Нормализует название вендора - просто uppercase и trim.
+        Никаких маппингов - KISS принцип.
 
         Args:
             vendor: Исходное название вендора
 
         Returns:
-            Стандартизованное название
+            Vendor name в uppercase
         """
         if not vendor:
             return ""
 
-        vendor_lower = vendor.strip().lower()
-
-        # Проверяем таблицу маппинга
-        mapped = DataNormalizer.VENDOR_NAME_MAPPING.get(vendor_lower)
-
-        # Если есть маппинг - используем его, иначе uppercase
-        return mapped if mapped else vendor.strip().upper()
+        return vendor.strip().upper()
 
     @staticmethod
     def is_price_on_request(price_str: str) -> bool:

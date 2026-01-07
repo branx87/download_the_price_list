@@ -52,23 +52,14 @@ class SqlRepository(IRepository):
         # Нормализуем vendor name для поиска
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
-        # Для OWEN ищем также по старому названию "ОВЕН"
-        vendor_variants = [vendor_normalized]
-        if vendor_normalized == 'OWEN':
-            vendor_variants.append('ОВЕН')
-
         with self.SessionLocal() as session:
-            # Формируем плейсхолдеры для IN clause
-            placeholders = ', '.join([f':vendor{i}' for i in range(len(vendor_variants))])
-            query = text(f"""
+            query = text("""
                 SELECT Vendor, Part_Num, Descr, Price, Units, Storage
                 FROM Total_Price
-                WHERE Vendor IN ({placeholders}) AND Status != 'disappeared'
+                WHERE Vendor = :vendor AND Status != 'disappeared'
             """)
 
-            # Формируем параметры
-            params = {f'vendor{i}': v for i, v in enumerate(vendor_variants)}
-            result = session.execute(query, params)
+            result = session.execute(query, {'vendor': vendor_normalized})
 
             items = []
             for row in result:
@@ -129,19 +120,14 @@ class SqlRepository(IRepository):
         with self.SessionLocal() as session:
             current_time = datetime.now().isoformat()
 
-            # Группируем items по вендору для batch операций
-            # OWEN может приходить как 'OWEN' или 'ОВЕН'
-            owen_items = [item for item in items if item.vendor in ('OWEN', 'ОВЕН')]
-            other_items = [item for item in items if item.vendor not in ('OWEN', 'ОВЕН')]
-
             updated_count = 0
 
-            # Batch update для OWEN/ОВЕН
-            if owen_items:
+            # Batch update для всех вендоров
+            if items:
                 # Разбиваем на батчи по 1000 для оптимизации
                 batch_size = 1000
-                for i in range(0, len(owen_items), batch_size):
-                    batch = owen_items[i:i + batch_size]
+                for i in range(0, len(items), batch_size):
+                    batch = items[i:i + batch_size]
                     data = [
                         {
                             "price": float(item.price),
@@ -173,43 +159,6 @@ class SqlRepository(IRepository):
                     if i % 5000 == 0 and i > 0:
                         session.flush()
 
-            # Batch update для остальных вендоров
-            if other_items:
-                # Разбиваем на батчи по 1000 для оптимизации
-                batch_size = 1000
-                for i in range(0, len(other_items), batch_size):
-                    batch = other_items[i:i + batch_size]
-                    data = [
-                        {
-                            "price": float(item.price),
-                            "descr": item.description or "",
-                            "units": item.units or "шт",
-                            "storage": item.storage or "",
-                            "vendor": item.vendor,
-                            "article": item.article,
-                            "updated_at": current_time
-                        }
-                        for item in batch
-                    ]
-
-                    query = text("""
-                        UPDATE Total_Price
-                        SET Price = :price,
-                            Descr = :descr,
-                            Units = :units,
-                            Storage = :storage,
-                            Status = 'price_changed',
-                            updated_at = :updated_at
-                        WHERE Vendor = :vendor AND TRIM(Part_Num) = :article
-                    """)
-
-                    session.execute(query, data)
-                    updated_count += len(batch)
-
-                    # Flush каждые 1000 записей для освобождения памяти
-                    if i % 5000 == 0 and i > 0:
-                        session.flush()
-
             session.commit()
             return updated_count
 
@@ -221,16 +170,8 @@ class SqlRepository(IRepository):
         # Нормализуем vendor name
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
-        # Для OWEN ищем также по старому названию "ОВЕН"
-        vendor_variants = [vendor_normalized]
-        if vendor_normalized == 'OWEN':
-            vendor_variants.append('ОВЕН')
-
         with self.SessionLocal() as session:
             current_time = datetime.now().isoformat()
-
-            # Формируем плейсхолдеры для IN clause (вендоры)
-            vendor_placeholders = ', '.join([f':vendor{i}' for i in range(len(vendor_variants))])
 
             # SQLite имеет ограничение на количество параметров (~999)
             # Разбиваем articles на батчи по 500
@@ -247,12 +188,12 @@ class SqlRepository(IRepository):
                     UPDATE Total_Price
                     SET Status = 'disappeared',
                         updated_at = :updated_at
-                    WHERE Vendor IN ({vendor_placeholders})
+                    WHERE Vendor = :vendor
                     AND TRIM(Part_Num) IN ({article_placeholders})
                 """)
 
                 # Формируем параметры
-                params = {f'vendor{i}': v for i, v in enumerate(vendor_variants)}
+                params = {'vendor': vendor_normalized}
                 params.update({f'article{j}': art for j, art in enumerate(batch)})
                 params['updated_at'] = current_time
 
@@ -271,49 +212,31 @@ class SqlRepository(IRepository):
         # Нормализуем vendor name
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
-        # Для OWEN удаляем также по старому названию "ОВЕН"
-        vendor_variants = [vendor_normalized]
-        if vendor_normalized == 'OWEN':
-            vendor_variants.append('ОВЕН')
-
         cutoff_date = datetime.now() - timedelta(days=days)
 
-        # Формируем плейсхолдеры для IN clause
-        placeholders = ', '.join([f':vendor{i}' for i in range(len(vendor_variants))])
-        query = text(f"""
+        query = text("""
             DELETE FROM Total_Price
-            WHERE Vendor IN ({placeholders})
+            WHERE Vendor = :vendor
             AND Status = 'disappeared'
             AND updated_at < :cutoff_date
         """)
 
-        # Формируем параметры
-        params = {f'vendor{i}': v for i, v in enumerate(vendor_variants)}
-        params['cutoff_date'] = cutoff_date
-
         with self.SessionLocal() as session:
-            session.execute(query, params)
+            session.execute(query, {'vendor': vendor_normalized, 'cutoff_date': cutoff_date})
             session.commit()
 
     def get_vendor_last_update(self, vendor: str) -> Optional[datetime]:
         """Получить дату последнего обновления вендора"""
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
-        # Для OWEN ищем также по старому названию "ОВЕН"
-        vendor_variants = [vendor_normalized]
-        if vendor_normalized == 'OWEN':
-            vendor_variants.append('ОВЕН')
-
         with self.SessionLocal() as session:
-            placeholders = ', '.join([f':vendor{i}' for i in range(len(vendor_variants))])
-            query = text(f"""
+            query = text("""
                 SELECT MAX(updated_at)
                 FROM Total_Price
-                WHERE Vendor IN ({placeholders})
+                WHERE Vendor = :vendor
             """)
 
-            params = {f'vendor{i}': v for i, v in enumerate(vendor_variants)}
-            result = session.execute(query, params).fetchone()
+            result = session.execute(query, {'vendor': vendor_normalized}).fetchone()
 
             if result and result[0]:
                 # Преобразуем строку в datetime, если нужно
