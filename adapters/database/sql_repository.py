@@ -108,9 +108,11 @@ class SqlRepository(IRepository):
                 for item in items
             ]
 
-            result = session.execute(query, data)
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем connection.execute() для batch операции
+            connection = session.connection()
+            connection.execute(query, data)
             session.commit()
-            return result.rowcount
+            return len(items)
 
     def update_items(self, items: List[PriceItem]) -> int:
         """Обновить существующие позиции (оптимизированная batch версия)"""
@@ -152,7 +154,10 @@ class SqlRepository(IRepository):
                         WHERE Vendor = :vendor AND TRIM(Part_Num) = :article
                     """)
 
-                    session.execute(query, data)
+                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем connection.execute() с executemany
+                    # для настоящей batch операции
+                    connection = session.connection()
+                    connection.execute(query, data)
                     updated_count += len(batch)
 
                     # Flush каждые 5000 записей для освобождения памяти
