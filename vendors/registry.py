@@ -6,6 +6,7 @@ from adapters.downloaders.simple_http import SimpleHttpDownloader
 from adapters.downloaders.auth_http import AuthHttpDownloader
 from adapters.downloaders.iek_downloader import IekDownloader
 from adapters.downloaders.chint_downloader import ChintDownloader
+from adapters.downloaders.ekf_downloader import EkfDownloader
 from adapters.parsers.excel_parser import ExcelParser
 from utils.normalizer import ArticleNormalizer
 from adapters.downloaders.dkc_downloader import DkcDownloader
@@ -72,10 +73,9 @@ class VendorRegistry:
 
             'EKF': VendorConfig(
                 name='EKF',
-                downloader_class=SimpleHttpDownloader,
+                downloader_class=EkfDownloader,
                 downloader_params={
-                    'download_dir': self.download_dir,
-                    'url': f'https://api.ekfgroup.com/storage/prices/ekf_pricelist_{datetime.now().strftime("%Y-%m-%d")}.xlsx'
+                    'download_dir': self.download_dir
                 },
                 parser_config={
                     'engine': 'openpyxl',

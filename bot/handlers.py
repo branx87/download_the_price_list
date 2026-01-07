@@ -87,28 +87,37 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать последние ошибки"""
     debug_info = []
-    
+
     # Проверяем last_error
     if sync_status.get('last_error'):
         debug_info.append(f"🔍 Last Error:\n{sync_status['last_error'][:800]}")
-    
+
     # Показываем stdout и stderr последнего запуска
     if sync_status.get('last_stdout'):
-        debug_info.append(f"\n📤 STDOUT:\n{sync_status['last_stdout'][-800:]}")
-    
+        stdout = sync_status['last_stdout']
+        # Ищем ошибки в stdout
+        if 'ERROR' in stdout or 'Traceback' in stdout or '❌' in stdout:
+            debug_info.append(f"\n📤 STDOUT (последние 1500 символов):\n{stdout[-1500:]}")
+        else:
+            debug_info.append(f"\n📤 STDOUT: OK (без ошибок)")
+
     if sync_status.get('last_stderr'):
-        debug_info.append(f"\n📥 STDERR:\n{sync_status['last_stderr'][-800:]}")
-    
+        stderr = sync_status['last_stderr']
+        if stderr.strip():  # Показываем только если есть содержимое
+            debug_info.append(f"\n📥 STDERR:\n{stderr[-1000:]}")
+
     # Показываем return code
     if sync_status.get('last_returncode') is not None:
-        debug_info.append(f"\n🔢 Return Code: {sync_status['last_returncode']}")
-    
+        code = sync_status['last_returncode']
+        code_emoji = "✅" if code == 0 else "❌"
+        debug_info.append(f"\n🔢 Return Code: {code} {code_emoji}")
+
     if not debug_info:
         await update.message.reply_text("ℹ️ Нет данных для отладки")
         return
-    
+
     text = "\n".join(debug_info)
-    
+
     # Telegram ограничивает длину сообщения до 4096 символов
     if len(text) > 4000:
         # Разбиваем на части
