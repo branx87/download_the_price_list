@@ -151,7 +151,7 @@ class SqlRepository(IRepository):
                             Storage = :storage,
                             Status = 'price_changed',
                             updated_at = :updated_at
-                        WHERE Vendor = :vendor AND TRIM(Part_Num) = :article
+                        WHERE Vendor = :vendor AND Part_Num = :article
                     """)
 
                     # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем connection.execute() с executemany
@@ -194,7 +194,7 @@ class SqlRepository(IRepository):
                     SET Status = 'disappeared',
                         updated_at = :updated_at
                     WHERE Vendor = :vendor
-                    AND TRIM(Part_Num) IN ({article_placeholders})
+                    AND Part_Num IN ({article_placeholders})
                 """)
 
                 # Формируем параметры
