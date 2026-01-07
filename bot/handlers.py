@@ -56,7 +56,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 /sync - Синхронизировать вендора
 /sync_all - Синхронизировать всех
-/check - Проверить актуальность прайсов
+/check - Проверить актуальность прайса
+/check_all - Проверить все прайсы
 /status - Статус
 /debug - Показать ошибки
 /help - Справка"""
@@ -82,6 +83,43 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text("📋 Выберите вендора для проверки:", reply_markup=reply_markup)
+
+
+async def check_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /check_all - проверка актуальности всех прайсов"""
+    vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
+
+    msg = await update.message.reply_text("🔍 Проверяю все прайсы...")
+
+    summary_lines = ["📊 Проверка всех прайсов:\n"]
+
+    for i, vendor in enumerate(vendors, 1):
+        try:
+            await msg.edit_text(f"🔍 {i}/{len(vendors)}: Проверяю {vendor}...")
+
+            service = create_sync_service(vendor)
+            result = service.check_price_changes(vendor)
+
+            # Формируем краткую сводку
+            if not result.has_changes:
+                summary_lines.append(f"✅ {vendor}: актуален")
+            else:
+                changes = []
+                if result.new_items_count > 0:
+                    changes.append(f"➕{result.new_items_count}")
+                if result.updated_items_count > 0:
+                    changes.append(f"🔄{result.updated_items_count}")
+                if result.disappeared_items_count > 0:
+                    changes.append(f"👻{result.disappeared_items_count}")
+
+                summary_lines.append(f"⚠️ {vendor}: {', '.join(changes)}")
+
+        except Exception as e:
+            logger.error(f"Ошибка проверки {vendor}: {e}", exc_info=True)
+            summary_lines.append(f"❌ {vendor}: ошибка")
+
+    summary = "\n".join(summary_lines)
+    await msg.edit_text(summary)
 
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -285,7 +323,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 /sync - Синхронизировать вендора
 /sync_all - Синхронизировать всех
-/check - Проверить актуальность прайсов
+/check - Проверить актуальность прайса
+/check_all - Проверить все прайсы
 /status - Статус синхронизаций
 /debug - Показать ошибки
 /help - Справка

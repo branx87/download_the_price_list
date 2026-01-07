@@ -183,25 +183,31 @@ class SyncService:
         try:
             logger.info(f"Проверка актуальности прайса {vendor}")
 
-            # 1. Загружаем и парсим файл
+            # 1. Получаем время последнего обновления БД
+            last_db_update = self.repository.get_vendor_last_update(vendor)
+
+            # 2. Загружаем и парсим файл
             if use_cached:
-                # Используем последний скачанный файл если он за сегодня
+                # Используем последний скачанный файл
                 from utils.file_storage import PriceFileStorage
                 from config.settings import settings
                 from datetime import datetime
                 storage = PriceFileStorage(settings.PRICE_FILES_DIR)
                 try:
                     latest_file = storage.get_latest_file(vendor)
-                    # Проверяем дату файла
-                    file_date = datetime.fromtimestamp(latest_file.stat().st_mtime).date()
-                    today = datetime.now().date()
+                    file_mtime = datetime.fromtimestamp(latest_file.stat().st_mtime)
 
-                    if file_date == today:
-                        file_path = latest_file
-                        logger.info(f"📂 Проверка по кэшу (файл за сегодня)")
-                    else:
-                        logger.info(f"⏰ Файл устарел ({file_date}), скачиваю свежий")
-                        file_path = self.downloader.download(vendor)
+                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем, что файл новее последнего обновления БД
+                    if last_db_update and file_mtime <= last_db_update:
+                        # Файл старее или равен последнему обновлению БД - нет изменений
+                        logger.info(f"📂 Файл ({file_mtime}) не новее БД ({last_db_update}) - изменений нет")
+                        result.total_in_file = self.repository.get_vendor_total_count(vendor)
+                        result.total_in_db = result.total_in_file
+                        result.last_db_update = last_db_update
+                        return result
+
+                    file_path = latest_file
+                    logger.info(f"📂 Проверка по кэшу (файл {file_mtime})")
                 except FileNotFoundError:
                     logger.warning(f"⚠️ Нет кэшированного файла, скачиваю новый")
                     file_path = self.downloader.download(vendor)
@@ -212,13 +218,13 @@ class SyncService:
             new_items = self.parser.parse(file_path, vendor)
             result.total_in_file = len(new_items)
 
-            # 2. Получаем текущие данные из БД (активные позиции)
+            # 3. Получаем текущие данные из БД (активные позиции)
             current_items = self.repository.get_items_by_vendor(vendor)
-            # Получаем общее количество включая исчезнувшие
-            result.total_in_db = self.repository.get_vendor_total_count(vendor)
-            result.last_db_update = self.repository.get_vendor_last_update(vendor)
+            # ИСПРАВЛЕНИЕ: Получаем количество только активных позиций (исключая disappeared)
+            result.total_in_db = len(current_items)
+            result.last_db_update = last_db_update
 
-            # 3. Создаем словари для быстрого поиска
+            # 4. Создаем словари для быстрого поиска
             current_items_map = {item.article: item for item in current_items}
             new_items_map = {item.article: item for item in new_items}
 
@@ -230,17 +236,17 @@ class SyncService:
             new_articles_with_price = set(new_items_with_price_map.keys())
             new_articles = set(new_items_map.keys())
 
-            # 4. Анализируем новые позиции
+            # 5. Анализируем новые позиции
             new_articles_set = new_articles_with_price - current_articles
             result.new_items = [new_items_with_price_map[art] for art in new_articles_set]
             result.new_items_count = len(result.new_items)
 
-            # 5. Анализируем исчезнувшие позиции
+            # 6. Анализируем исчезнувшие позиции
             disappeared_articles = current_articles - new_articles
             result.disappeared_items = [current_items_map[art] for art in disappeared_articles]
             result.disappeared_items_count = len(result.disappeared_items)
 
-            # 6. Анализируем изменения цен
+            # 7. Анализируем изменения цен
             for article in (new_articles_with_price & current_articles):
                 new_item = new_items_with_price_map[article]
                 old_item = current_items_map[article]
