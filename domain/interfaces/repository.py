@@ -41,3 +41,13 @@ class IRepository(ABC):
     def get_vendor_last_update(self, vendor: str) -> Optional[datetime]:
         """Получить дату последнего обновления вендора"""
         pass
+
+    @abstractmethod
+    def get_vendor_total_count(self, vendor: str) -> int:
+        """Получить общее количество позиций вендора (включая исчезнувшие)"""
+        pass
+
+    @abstractmethod
+    def reset_changed_status(self, vendor: str) -> int:
+        """Сбросить статус price_changed на active после синхронизации"""
+        pass

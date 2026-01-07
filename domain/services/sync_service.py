@@ -126,7 +126,12 @@ class SyncService:
             # 6. Очищаем старые исчезнувшие
             self.repository.delete_old_disappeared(vendor, days=30)
 
-            # 7. Создаем Excel отчет
+            # 7. Сбрасываем статус price_changed после синхронизации
+            reset_count = self.repository.reset_changed_status(vendor)
+            if reset_count > 0:
+                logger.info(f"🔄 Сброшен статус для {reset_count} позиций")
+
+            # 8. Создаем Excel отчет
             if self.report_service and result.changes_count > 0:
                 try:
                     report_path = self.report_service.create_report(vendor, result)
@@ -182,9 +187,10 @@ class SyncService:
             new_items = self.parser.parse(file_path, vendor)
             result.total_in_file = len(new_items)
 
-            # 2. Получаем текущие данные из БД
+            # 2. Получаем текущие данные из БД (активные позиции)
             current_items = self.repository.get_items_by_vendor(vendor)
-            result.total_in_db = len(current_items)
+            # Получаем общее количество включая исчезнувшие
+            result.total_in_db = self.repository.get_vendor_total_count(vendor)
             result.last_db_update = self.repository.get_vendor_last_update(vendor)
 
             # 3. Создаем словари для быстрого поиска

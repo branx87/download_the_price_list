@@ -249,3 +249,32 @@ class SqlRepository(IRepository):
                     return datetime.fromisoformat(result[0])
                 return result[0]
             return None
+
+    def get_vendor_total_count(self, vendor: str) -> int:
+        """Получить общее количество позиций вендора (включая исчезнувшие)"""
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+
+        with self.SessionLocal() as session:
+            query = text("""
+                SELECT COUNT(*)
+                FROM Total_Price
+                WHERE Vendor = :vendor
+            """)
+
+            result = session.execute(query, {'vendor': vendor_normalized}).fetchone()
+            return result[0] if result else 0
+
+    def reset_changed_status(self, vendor: str) -> int:
+        """Сбросить статус price_changed на active после синхронизации"""
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+
+        with self.SessionLocal() as session:
+            query = text("""
+                UPDATE Total_Price
+                SET Status = 'active'
+                WHERE Vendor = :vendor AND Status = 'price_changed'
+            """)
+
+            result = session.execute(query, {'vendor': vendor_normalized})
+            session.commit()
+            return result.rowcount
