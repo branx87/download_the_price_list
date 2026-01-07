@@ -18,14 +18,26 @@ if sys.platform == 'win32':
 
 
 # Настройка логирования
+# Используем utf-8 с BOM только для Windows
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/sync.log', encoding='utf-8'),
+        logging.FileHandler('logs/sync.log', encoding='utf-8-sig' if sys.platform == 'win32' else 'utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+# Для Windows: добавляем BOM в начало файла если его нет
+if sys.platform == 'win32':
+    log_file = Path('logs/sync.log')
+    if log_file.exists():
+        with open(log_file, 'rb') as f:
+            content = f.read()
+        # Проверяем есть ли BOM (UTF-8 BOM = EF BB BF)
+        if not content.startswith(b'\xef\xbb\xbf'):
+            with open(log_file, 'wb') as f:
+                f.write(b'\xef\xbb\xbf' + content)
 
 logger = logging.getLogger(__name__)
 

@@ -64,10 +64,11 @@ class DataNormalizer:
     }
 
     # Таблица соответствий vendor names
+    # ВАЖНО: Используем кириллицу 'ОВЕН' для обратной совместимости с БД
     VENDOR_NAME_MAPPING = {
-        'owen': 'OWEN',
-        'овен': 'OWEN',
-        'оуэн': 'OWEN',
+        'owen': 'ОВЕН',
+        'овен': 'ОВЕН',
+        'оуэн': 'ОВЕН',
     }
 
     @staticmethod

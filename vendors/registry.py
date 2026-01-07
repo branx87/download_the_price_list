@@ -51,8 +51,8 @@ class VendorRegistry:
                 }
             ),
 
-            'OWEN': VendorConfig(
-                name='OWEN',
+            'ОВЕН': VendorConfig(
+                name='ОВЕН',
                 downloader_class=SimpleHttpDownloader,
                 downloader_params={
                     'download_dir': self.download_dir,
@@ -97,8 +97,8 @@ class VendorRegistry:
                     'engine': 'openpyxl',
                     'columns': {
                         'article': 'Артикул',
-                        'description': 'Наименование',  # Теперь без email - умное объединение заголовков
-                        'price': 'Базовая цена с НДС',  # Только для цен объединяем
+                        'description': 'Наименование',
+                        'price': 'Базовая цена с НДС (22%)',
                         'units': 'Ед.'
                     }
                 }

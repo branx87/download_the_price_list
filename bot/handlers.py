@@ -66,7 +66,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /sync"""
-    vendors = ['KEAZ', 'OWEN', 'EKF', 'IEK', 'DKC', 'CHINT']
+    vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
 
     keyboard = [[InlineKeyboardButton(f"🔄 {v}", callback_data=f"sync_{v}")] for v in vendors]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -76,7 +76,7 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /check - проверка актуальности прайсов"""
-    vendors = ['KEAZ', 'OWEN', 'EKF', 'IEK', 'DKC', 'CHINT']
+    vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
 
     keyboard = [[InlineKeyboardButton(f"🔍 {v}", callback_data=f"check_{v}")] for v in vendors]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -150,7 +150,7 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text("🚀 Запускаю синхронизацию...")
 
-    vendors = ['KEAZ', 'OWEN', 'EKF', 'IEK', 'DKC', 'CHINT']
+    vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
 
     for i, vendor in enumerate(vendors, 1):
         sync_status['current_vendor'] = vendor
@@ -265,7 +265,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def vendors_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /vendors"""
-    vendors = ['KEAZ', 'OWEN', 'EKF', 'IEK', 'DKC', 'CHINT']
+    vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
     text = "📋 Вендоры:\n\n" + "\n".join(f"{i}. {v}" for i, v in enumerate(vendors, 1))
     await update.message.reply_text(text)
 

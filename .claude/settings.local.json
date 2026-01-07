@@ -16,7 +16,12 @@
       "Bash(dir:*)",
       "Bash(python main.py:*)",
       "Bash(d:\\\\projects\\\\price_sync_bot\\\\venv\\\\Scripts\\\\python.exe:*)",
-      "Bash(./venv/Scripts/python.exe:*)"
+      "Bash(./venv/Scripts/python.exe:*)",
+      "Bash(python -c:*)",
+      "Bash(mkdir:*)",
+      "Bash(sqlite3:*)",
+      "Bash(.venvScriptspython.exe -c \"from adapters.database.sql_repository import SqlRepository; from config.settings import settings; repo = SqlRepository\\(settings.DATABASE_URL\\); print\\(''✅ БД подключена успешно''\\)\")",
+      "Bash(d:/projects/price_sync_bot/venv/Scripts/python.exe:*)"
     ]
   }
 }

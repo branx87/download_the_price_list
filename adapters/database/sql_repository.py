@@ -108,10 +108,10 @@ class SqlRepository(IRepository):
                 {
                     "vendor": item.vendor,
                     "article": item.article,
-                    "descr": item.description,
+                    "descr": item.description or "",
                     "price": float(item.price),
-                    "units": item.units,
-                    "storage": item.storage,
+                    "units": item.units or "шт",
+                    "storage": item.storage or "",
                     "updated_at": current_time
                 }
                 for item in items
@@ -122,53 +122,99 @@ class SqlRepository(IRepository):
             return result.rowcount
 
     def update_items(self, items: List[PriceItem]) -> int:
-        """Обновить существующие позиции"""
+        """Обновить существующие позиции (оптимизированная batch версия)"""
         if not items:
             return 0
 
         with self.SessionLocal() as session:
             current_time = datetime.now().isoformat()
+
+            # Группируем items по вендору для batch операций
+            # OWEN может приходить как 'OWEN' или 'ОВЕН'
+            owen_items = [item for item in items if item.vendor in ('OWEN', 'ОВЕН')]
+            other_items = [item for item in items if item.vendor not in ('OWEN', 'ОВЕН')]
+
             updated_count = 0
 
-            for item in items:
-                # Для OWEN пробуем обновить как OWEN, так и ОВЕН
-                vendor_variants = [item.vendor]
-                if item.vendor == 'OWEN':
-                    vendor_variants.append('ОВЕН')
+            # Batch update для OWEN/ОВЕН
+            if owen_items:
+                # Разбиваем на батчи по 1000 для оптимизации
+                batch_size = 1000
+                for i in range(0, len(owen_items), batch_size):
+                    batch = owen_items[i:i + batch_size]
+                    data = [
+                        {
+                            "price": float(item.price),
+                            "descr": item.description or "",
+                            "units": item.units or "шт",
+                            "storage": item.storage or "",
+                            "vendor": item.vendor,
+                            "article": item.article,
+                            "updated_at": current_time
+                        }
+                        for item in batch
+                    ]
 
-                for vendor_variant in vendor_variants:
                     query = text("""
                         UPDATE Total_Price
                         SET Price = :price,
                             Descr = :descr,
                             Units = :units,
                             Storage = :storage,
-                            Vendor = :new_vendor,
                             Status = 'price_changed',
                             updated_at = :updated_at
-                        WHERE Vendor = :old_vendor AND TRIM(Part_Num) = :article
+                        WHERE Vendor = :vendor AND TRIM(Part_Num) = :article
                     """)
 
-                    result = session.execute(query, {
-                        "price": float(item.price),
-                        "descr": item.description,
-                        "units": item.units,
-                        "storage": item.storage,
-                        "new_vendor": item.vendor,  # Обновляем на нормализованное имя
-                        "old_vendor": vendor_variant,
-                        "article": item.article,
-                        "updated_at": current_time
-                    })
+                    session.execute(query, data)
+                    updated_count += len(batch)
 
-                    updated_count += result.rowcount
-                    if result.rowcount > 0:
-                        break  # Нашли и обновили, выходим из цикла вариантов
+                    # Flush каждые 5000 записей для освобождения памяти
+                    if i % 5000 == 0 and i > 0:
+                        session.flush()
+
+            # Batch update для остальных вендоров
+            if other_items:
+                # Разбиваем на батчи по 1000 для оптимизации
+                batch_size = 1000
+                for i in range(0, len(other_items), batch_size):
+                    batch = other_items[i:i + batch_size]
+                    data = [
+                        {
+                            "price": float(item.price),
+                            "descr": item.description or "",
+                            "units": item.units or "шт",
+                            "storage": item.storage or "",
+                            "vendor": item.vendor,
+                            "article": item.article,
+                            "updated_at": current_time
+                        }
+                        for item in batch
+                    ]
+
+                    query = text("""
+                        UPDATE Total_Price
+                        SET Price = :price,
+                            Descr = :descr,
+                            Units = :units,
+                            Storage = :storage,
+                            Status = 'price_changed',
+                            updated_at = :updated_at
+                        WHERE Vendor = :vendor AND TRIM(Part_Num) = :article
+                    """)
+
+                    session.execute(query, data)
+                    updated_count += len(batch)
+
+                    # Flush каждые 1000 записей для освобождения памяти
+                    if i % 5000 == 0 and i > 0:
+                        session.flush()
 
             session.commit()
             return updated_count
 
     def mark_as_disappeared(self, vendor: str, articles: List[str]) -> int:
-        """Пометить позиции как исчезнувшие"""
+        """Пометить позиции как исчезнувшие (оптимизированная batch версия)"""
         if not articles:
             return 0
 
@@ -182,32 +228,43 @@ class SqlRepository(IRepository):
 
         with self.SessionLocal() as session:
             current_time = datetime.now().isoformat()
+
+            # Формируем плейсхолдеры для IN clause (вендоры)
+            vendor_placeholders = ', '.join([f':vendor{i}' for i in range(len(vendor_variants))])
+
+            # SQLite имеет ограничение на количество параметров (~999)
+            # Разбиваем articles на батчи по 500
+            batch_size = 500
             updated_count = 0
 
-            # Формируем плейсхолдеры для IN clause
-            placeholders = ', '.join([f':vendor{i}' for i in range(len(vendor_variants))])
+            for i in range(0, len(articles), batch_size):
+                batch = articles[i:i + batch_size]
 
-            for article in articles:
+                # Формируем плейсхолдеры для IN clause (артикулы)
+                article_placeholders = ', '.join([f':article{j}' for j in range(len(batch))])
+
                 query = text(f"""
                     UPDATE Total_Price
                     SET Status = 'disappeared',
                         updated_at = :updated_at
-                    WHERE Vendor IN ({placeholders}) AND TRIM(Part_Num) = :article
+                    WHERE Vendor IN ({vendor_placeholders})
+                    AND TRIM(Part_Num) IN ({article_placeholders})
                 """)
 
                 # Формируем параметры
                 params = {f'vendor{i}': v for i, v in enumerate(vendor_variants)}
-                params['article'] = article
+                params.update({f'article{j}': art for j, art in enumerate(batch)})
                 params['updated_at'] = current_time
 
                 result = session.execute(query, params)
                 updated_count += result.rowcount
 
-                # Debug: логируем первые неудачные обновления
-                if result.rowcount == 0 and updated_count < 5:
-                    logger.warning(f"⚠️ Не найден для пометки disappeared: {article}")
-
             session.commit()
+
+            # Debug: логируем если обновлено меньше чем ожидалось
+            if updated_count < len(articles):
+                logger.warning(f"⚠️ Обновлено {updated_count} из {len(articles)} исчезнувших позиций")
+
             return updated_count
 
     def delete_old_disappeared(self, vendor: str, days: int = 30):
