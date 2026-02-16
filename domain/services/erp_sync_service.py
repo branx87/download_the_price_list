@@ -1,0 +1,165 @@
+import logging
+from collections import Counter
+from typing import List
+
+from adapters.erp.erp_client import ErpClient
+from adapters.database.sql_repository import SqlRepository
+from domain.entities.erp_sync_result import ErpSyncResult
+
+logger = logging.getLogger(__name__)
+
+
+class ErpSyncService:
+    """Сервис синхронизации номенклатуры из 1C-ERP"""
+
+    def __init__(self, erp_client: ErpClient, repository: SqlRepository):
+        self.erp_client = erp_client
+        self.repository = repository
+
+    def sync_from_erp(self) -> ErpSyncResult:
+        """
+        Загрузка номенклатуры из 1C-ERP.
+
+        Логика:
+        1. Получаем все позиции из API
+        2. Проверяем дубликаты по code (ArticlePC) — логируем, пропускаем
+        3. Для каждой уникальной позиции:
+           - Если ArticlePC уже есть в БД → пропускаем
+           - Если найден по Vendor+Part_Num → проставляем ArticlePC
+           - Иначе → INSERT новую запись
+        """
+        result = ErpSyncResult()
+
+        try:
+            # 1. Загружаем данные из 1C
+            raw_items = self.erp_client.fetch_nomenclature()
+            result.total_received = len(raw_items)
+            logger.info(f"Получено {len(raw_items)} позиций из 1C-ERP")
+
+            # 2. Проверяем дубликаты по code
+            unique_items, duplicate_codes = self._check_duplicates(raw_items)
+            result.duplicate_codes = duplicate_codes
+            result.skipped_duplicates = len(raw_items) - len(unique_items)
+
+            if duplicate_codes:
+                logger.warning(f"Обнаружено {len(duplicate_codes)} дублирующихся кодов ArticlePC")
+                for code in duplicate_codes[:10]:
+                    logger.warning(f"  Дубликат: {code}")
+                if len(duplicate_codes) > 10:
+                    logger.warning(f"  ... и ещё {len(duplicate_codes) - 10}")
+
+            # 3. Загружаем существующие данные из БД для быстрого поиска
+            logger.debug("Загрузка существующих ArticlePC из БД...")
+            existing_article_pcs = self.repository.get_all_article_pcs()
+            logger.debug(f"В БД найдено {len(existing_article_pcs)} ArticlePC")
+
+            logger.debug("Загрузка существующих пар Vendor+Part_Num из БД...")
+            existing_pairs = self.repository.get_all_vendor_part_num_pairs()
+            logger.debug(f"В БД найдено {len(existing_pairs)} пар Vendor+Part_Num")
+
+            # 4. Классифицируем позиции
+            to_insert = []
+            to_update_article_pc = []
+
+            for item in unique_items:
+                try:
+                    code = (item.get('code') or '').strip()
+                    manufacturer = (item.get('manufacturer') or '').strip()
+                    article = (item.get('article') or '').strip()
+                    name = (item.get('name') or '').strip()
+                    unit = (item.get('unit') or 'шт').strip()
+
+                    if not code or not manufacturer or not article:
+                        logger.debug(f"Пропуск позиции без обязательных полей: code={code}, "
+                                    f"manufacturer={manufacturer}, article={article}")
+                        result.errors += 1
+                        result.error_details.append(
+                            f"Пустые обязательные поля: code={code}, manufacturer={manufacturer}, article={article}"
+                        )
+                        continue
+
+                    # Шаг 1: ArticlePC уже есть в БД → пропускаем
+                    if code in existing_article_pcs:
+                        result.skipped_existing += 1
+                        continue
+
+                    # Шаг 2: Найден по Vendor+Part_Num → добавляем ArticlePC
+                    if (manufacturer, article) in existing_pairs:
+                        to_update_article_pc.append({
+                            'vendor': manufacturer,
+                            'part_num': article,
+                            'article_pc': code
+                        })
+                        existing_article_pcs.add(code)
+                        result.updated += 1
+                        continue
+
+                    # Шаг 3: Нигде не найден → INSERT
+                    to_insert.append({
+                        'vendor': manufacturer,
+                        'part_num': article,
+                        'descr': name,
+                        'units': unit,
+                        'article_pc': code
+                    })
+                    existing_article_pcs.add(code)
+                    existing_pairs.add((manufacturer, article))
+                    result.added += 1
+
+                except Exception as e:
+                    result.errors += 1
+                    result.error_details.append(f"Ошибка обработки позиции {item.get('code', '?')}: {e}")
+                    logger.error(f"Ошибка обработки позиции: {e}", exc_info=True)
+
+            # 5. Применяем изменения в БД
+            if to_update_article_pc:
+                logger.info(f"Обновление ArticlePC для {len(to_update_article_pc)} позиций...")
+                self.repository.bulk_set_article_pc(to_update_article_pc)
+
+            if to_insert:
+                logger.info(f"Добавление {len(to_insert)} новых позиций из 1C-ERP...")
+                self.repository.add_erp_items(to_insert)
+
+            logger.info(
+                f"Синхронизация 1C-ERP завершена: "
+                f"получено={result.total_received}, "
+                f"добавлено={result.added}, "
+                f"обновлено_ArticlePC={result.updated}, "
+                f"пропущено_существующих={result.skipped_existing}, "
+                f"дубликатов={result.skipped_duplicates}, "
+                f"ошибок={result.errors}"
+            )
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка синхронизации 1C-ERP: {e}", exc_info=True)
+            result.errors += 1
+            result.error_details.append(f"Критическая ошибка: {e}")
+
+        return result
+
+    def _check_duplicates(self, items: List[dict]) -> tuple:
+        """
+        Проверяет дубликаты по полю code.
+
+        Returns:
+            (unique_items, duplicate_codes)
+        """
+        code_counts = Counter(item.get('code', '') for item in items)
+        duplicate_codes = [code for code, count in code_counts.items() if count > 1 and code]
+
+        duplicate_set = set(duplicate_codes)
+        seen_codes = set()
+        unique_items = []
+
+        for item in items:
+            code = item.get('code', '')
+            if code in duplicate_set:
+                # Для дубликатов берём только первое вхождение
+                if code not in seen_codes:
+                    unique_items.append(item)
+                    seen_codes.add(code)
+            else:
+                unique_items.append(item)
+                seen_codes.add(code)
+
+        return unique_items, duplicate_codes

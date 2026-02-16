@@ -17,6 +17,11 @@ class Settings:
     DKC_PASSWORD = os.getenv('DKC_PASSWORD', '11051987')
     PRICE_CHANGE_THRESHOLD = 0.01
 
+    # 1C-ERP интеграция
+    ONE_C_LOGIN = os.getenv('ONE_C_LOGIN', '')
+    ONE_C_PASSWORD = os.getenv('ONE_C_PASSWORD', '')
+    ERP_BASE_URL = os.getenv('ERP_BASE_URL', '')
+
     # Путь к Python из виртуального окружения
     @property
     def PYTHON_PATH(self):

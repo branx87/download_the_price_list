@@ -19,6 +19,7 @@ from bot.handlers import (
     status_command,
     vendors_command,
     help_command,
+    erp_command,
     button_callback
 )
 
@@ -73,6 +74,7 @@ def main():
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("vendors", vendors_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("erp", erp_command))
 
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_callback))

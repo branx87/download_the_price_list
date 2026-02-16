@@ -264,6 +264,134 @@ class SqlRepository(IRepository):
             result = session.execute(query, {'vendor': vendor_normalized}).fetchone()
             return result[0] if result else 0
 
+    # ========== Методы для 1C-ERP ==========
+
+    def find_by_article_pc(self, article_pc: str) -> bool:
+        """Проверяет, существует ли запись с данным ArticlePC"""
+        with self.SessionLocal() as session:
+            query = text("""
+                SELECT 1 FROM Total_Price
+                WHERE ArticlePC = :article_pc
+            """)
+            result = session.execute(query, {'article_pc': article_pc}).fetchone()
+            return result is not None
+
+    def find_by_vendor_part_num(self, vendor: str, part_num: str) -> bool:
+        """Проверяет, существует ли запись по Vendor + Part_Num"""
+        with self.SessionLocal() as session:
+            query = text("""
+                SELECT 1 FROM Total_Price
+                WHERE Vendor = :vendor AND Part_Num = :part_num
+            """)
+            result = session.execute(query, {'vendor': vendor, 'part_num': part_num}).fetchone()
+            return result is not None
+
+    def set_article_pc(self, vendor: str, part_num: str, article_pc: str) -> int:
+        """Устанавливает ArticlePC для существующей записи по Vendor+Part_Num"""
+        with self.SessionLocal() as session:
+            query = text("""
+                UPDATE Total_Price
+                SET ArticlePC = :article_pc,
+                    updated_at = :updated_at
+                WHERE Vendor = :vendor AND Part_Num = :part_num
+            """)
+            result = session.execute(query, {
+                'article_pc': article_pc,
+                'vendor': vendor,
+                'part_num': part_num,
+                'updated_at': datetime.now().isoformat()
+            })
+            session.commit()
+            return result.rowcount
+
+    def add_erp_items(self, items: list) -> int:
+        """
+        Batch INSERT позиций из 1C-ERP.
+
+        Каждый элемент items — dict с ключами:
+        vendor, part_num, descr, units, article_pc
+        """
+        if not items:
+            return 0
+
+        with self.SessionLocal() as session:
+            query = text("""
+                INSERT INTO Total_Price
+                (Vendor, Part_Num, Descr, Price, Units, PriceText, ArticlePC, Status, updated_at)
+                VALUES (:vendor, :part_num, :descr, 0, :units, :price_text, :article_pc, 'active', :updated_at)
+            """)
+
+            current_time = datetime.now().isoformat()
+            data = [
+                {
+                    'vendor': item['vendor'],
+                    'part_num': item['part_num'],
+                    'descr': item['descr'],
+                    'units': item['units'],
+                    'price_text': 'Цена по запросу',
+                    'article_pc': item['article_pc'],
+                    'updated_at': current_time
+                }
+                for item in items
+            ]
+
+            connection = session.connection()
+            connection.execute(query, data)
+            session.commit()
+            return len(items)
+
+    def bulk_set_article_pc(self, items: list) -> int:
+        """
+        Batch UPDATE ArticlePC для записей найденных по Vendor+Part_Num.
+
+        Каждый элемент items — dict с ключами: vendor, part_num, article_pc
+        """
+        if not items:
+            return 0
+
+        with self.SessionLocal() as session:
+            query = text("""
+                UPDATE Total_Price
+                SET ArticlePC = :article_pc,
+                    updated_at = :updated_at
+                WHERE Vendor = :vendor AND Part_Num = :part_num
+            """)
+
+            current_time = datetime.now().isoformat()
+            data = [
+                {
+                    'article_pc': item['article_pc'],
+                    'vendor': item['vendor'],
+                    'part_num': item['part_num'],
+                    'updated_at': current_time
+                }
+                for item in items
+            ]
+
+            connection = session.connection()
+            connection.execute(query, data)
+            session.commit()
+            return len(items)
+
+    def get_all_article_pcs(self) -> set:
+        """Получить все существующие ArticlePC из БД"""
+        with self.SessionLocal() as session:
+            query = text("""
+                SELECT ArticlePC FROM Total_Price
+                WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+            """)
+            result = session.execute(query)
+            return {row[0] for row in result}
+
+    def get_all_vendor_part_num_pairs(self) -> set:
+        """Получить все существующие пары Vendor+Part_Num"""
+        with self.SessionLocal() as session:
+            query = text("""
+                SELECT Vendor, Part_Num FROM Total_Price
+            """)
+            result = session.execute(query)
+            return {(row[0], row[1]) for row in result}
+
     def reset_changed_status(self, vendor: str) -> int:
         """Сбросить статус price_changed/new/NULL на active после синхронизации"""
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)

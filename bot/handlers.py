@@ -11,6 +11,8 @@ from vendors.registry import VendorRegistry
 from adapters.database.sql_repository import SqlRepository
 from domain.services.sync_service import SyncService
 from domain.services.report_service import ReportService
+from adapters.erp.erp_client import ErpClient
+from domain.services.erp_sync_service import ErpSyncService
 
 
 
@@ -58,6 +60,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /sync_all - Синхронизировать всех
 /check - Проверить актуальность прайса
 /check_all - Проверить все прайсы
+/erp - Обновить номенклатуру из 1C-ERP
 /status - Статус
 /debug - Показать ошибки
 /help - Справка"""
@@ -325,6 +328,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /sync_all - Синхронизировать всех
 /check - Проверить актуальность прайса
 /check_all - Проверить все прайсы
+/erp - Обновить номенклатуру из 1C-ERP
 /status - Статус синхронизаций
 /debug - Показать ошибки
 /help - Справка
@@ -334,10 +338,95 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def erp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /erp - обновить номенклатуру из 1C-ERP"""
+    if not settings.ERP_BASE_URL:
+        await update.message.reply_text("❌ ERP_BASE_URL не настроен в .env")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("📦 Обновить из 1C-ERP", callback_data="erp_sync")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "🏭 Загрузка номенклатуры из 1C-ERP\n\n"
+        "Будут добавлены только НОВЫЕ позиции.\n"
+        "Существующие позиции не изменяются.",
+        reply_markup=reply_markup
+    )
+
+
+async def _run_erp_sync(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Выполняет синхронизацию с 1C-ERP и отправляет результат"""
+    try:
+        erp_client = ErpClient(
+            base_url=settings.ERP_BASE_URL,
+            login=settings.ONE_C_LOGIN,
+            password=settings.ONE_C_PASSWORD
+        )
+        repository = SqlRepository(settings.DATABASE_URL)
+        service = ErpSyncService(erp_client, repository)
+
+        result = service.sync_from_erp()
+
+        # Формируем отчет
+        report_lines = ["📊 Результат загрузки из 1C-ERP:"]
+        report_lines.append(f"\n📥 Получено из 1C: {result.total_received}")
+        report_lines.append(f"➕ Добавлено новых: {result.added}")
+        report_lines.append(f"🔗 Привязано ArticlePC: {result.updated}")
+        report_lines.append(f"⏭ Пропущено (уже есть): {result.skipped_existing}")
+
+        if result.skipped_duplicates > 0:
+            report_lines.append(f"\n⚠️ Дубликатов кодов: {result.skipped_duplicates}")
+            if result.duplicate_codes:
+                codes_preview = result.duplicate_codes[:5]
+                report_lines.append("Коды: " + ", ".join(codes_preview))
+                if len(result.duplicate_codes) > 5:
+                    report_lines.append(f"  ... и ещё {len(result.duplicate_codes) - 5}")
+
+        if result.has_errors:
+            report_lines.append(f"\n❌ Ошибок: {result.errors}")
+            for detail in result.error_details[:3]:
+                report_lines.append(f"  - {detail[:100]}")
+
+        report = "\n".join(report_lines)
+
+        if len(report) > 4000:
+            report = report[:3900] + "\n\n... (обрезано)"
+
+        await context.bot.send_message(chat_id=chat_id, text=report)
+
+    except Exception as e:
+        logger.error(f"Ошибка синхронизации 1C-ERP: {e}", exc_info=True)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Ошибка загрузки из 1C-ERP: {str(e)[:300]}"
+        )
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопок"""
     query = update.callback_query
     await query.answer()
+
+    if query.data == 'erp_sync':
+        if sync_status['is_running']:
+            await query.edit_message_text(f"⚠️ Уже идет операция: {sync_status['current_vendor']}")
+            return
+
+        sync_status['is_running'] = True
+        sync_status['current_vendor'] = '1C-ERP'
+
+        await query.edit_message_text("🔄 Загрузка номенклатуры из 1C-ERP...")
+
+        try:
+            await _run_erp_sync(query.message.chat_id, query.message.message_id, context)
+        finally:
+            sync_status['is_running'] = False
+            sync_status['current_vendor'] = None
+
+        return
 
     if query.data.startswith('check_'):
         vendor = query.data.replace('check_', '')
