@@ -73,12 +73,15 @@ class ErpSyncService:
                     code = (item.get('code') or '').strip()
                     manufacturer_raw = (item.get('manufacturer') or '').strip()
                     manufacturer = DataNormalizer.normalize_vendor_name(manufacturer_raw)
-                    article = (item.get('article') or '').strip()
+                    article_raw = (item.get('article') or '').strip()
+                    article = DataNormalizer.normalize_article(article_raw)
                     name = (item.get('name') or '').strip()
                     unit = (item.get('unit') or 'шт').strip()
 
                     if manufacturer_raw != manufacturer:
-                        logger.debug(f"[FIX] Нормализация производителя: '{manufacturer_raw}' -> '{manufacturer}'")
+                        logger.debug(f"[ERP] Нормализация производителя: '{manufacturer_raw}' -> '{manufacturer}'")
+                    if article_raw != article:
+                        logger.debug(f"[ERP] Нормализация артикула: '{article_raw}' -> '{article}'")
 
                     if not code or not manufacturer or not article:
                         logger.debug(f"Пропуск позиции без обязательных полей: code={code}, "

@@ -26,6 +26,7 @@ class SqlRepository(IRepository):
             self._apply_sqlite_pragmas()
         self._ensure_indexes()
         self.cleanup_none_strings()
+        self.cleanup_whitespace()
 
     def _apply_sqlite_pragmas(self):
         """Оптимизация SQLite для быстрой записи"""
@@ -102,6 +103,37 @@ class SqlRepository(IRepository):
             logger.info(f"[FIX] Итого очищено {total_fixed} значений 'None' в БД")
         else:
             logger.debug("[FIX] Строк 'None' в БД не обнаружено")
+
+    def cleanup_whitespace(self):
+        """Обрезает пробелы в ключевых полях Vendor, Part_Num, ArticlePC.
+        Актуально для MSSQL — данные из 1C часто содержат пробелы в начале/конце."""
+        if self.is_sqlite:
+            trim = lambda col: f"TRIM({col})"
+            not_trimmed = lambda col: f"{col} != TRIM({col})"
+        else:
+            trim = lambda col: f"LTRIM(RTRIM({col}))"
+            not_trimmed = lambda col: f"{col} != LTRIM(RTRIM({col}))"
+
+        fields = ['Vendor', 'Part_Num', 'ArticlePC']
+        total_fixed = 0
+        for col in fields:
+            try:
+                with self.SessionLocal() as session:
+                    result = session.execute(text(
+                        f"UPDATE Total_Price SET {col} = {trim(col)} "
+                        f"WHERE {col} IS NOT NULL AND {col} != '' "
+                        f"AND {not_trimmed(col)}"
+                    ))
+                    session.commit()
+                    if result.rowcount > 0:
+                        logger.info(f"[FIX] Обрезаны пробелы в {col}: {result.rowcount} записей")
+                        total_fixed += result.rowcount
+            except Exception as e:
+                logger.error(f"Ошибка обрезки пробелов в {col}: {e}")
+        if total_fixed > 0:
+            logger.info(f"[FIX] Итого обрезано пробелов: {total_fixed} записей")
+        else:
+            logger.debug("[FIX] Лишних пробелов в ключевых полях не обнаружено")
 
     @property
     def _nolock(self) -> str:
@@ -562,23 +594,24 @@ class SqlRepository(IRepository):
         return total
 
     def get_all_article_pcs(self) -> set:
-        """Получить все существующие ArticlePC из БД"""
+        """Получить все существующие ArticlePC из БД (с нормализацией пробелов)"""
         with self.SessionLocal() as session:
             query = text(f"""
                 SELECT ArticlePC FROM Total_Price {self._nolock}
                 WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
             """)
             result = session.execute(query)
-            return {row[0] for row in result}
+            return {row[0].strip() for row in result if row[0]}
 
     def get_all_vendor_part_num_pairs(self) -> set:
-        """Получить все существующие пары Vendor+Part_Num"""
+        """Получить все существующие пары Vendor+Part_Num (с нормализацией пробелов)"""
         with self.SessionLocal() as session:
             query = text(f"""
                 SELECT Vendor, Part_Num FROM Total_Price {self._nolock}
+                WHERE Part_Num IS NOT NULL AND Part_Num != ''
             """)
             result = session.execute(query)
-            return {(row[0], row[1]) for row in result}
+            return {(row[0].strip() if row[0] else '', row[1].strip() if row[1] else '') for row in result}
 
     def reset_changed_status(self, vendor: str) -> int:
         """Сбросить статус price_changed/new/NULL на active после синхронизации"""
