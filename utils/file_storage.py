@@ -32,13 +32,14 @@ class PriceFileStorage:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(exist_ok=True, parents=True)
 
-    def get_storage_path(self, vendor: str, timestamp: datetime = None) -> Path:
+    def get_storage_path(self, vendor: str, timestamp: datetime = None, extension: str = '.xlsx') -> Path:
         """
         Возвращает путь для сохранения файла с автоматической очисткой старых файлов.
 
         Args:
             vendor: Название вендора
             timestamp: Временная метка (по умолчанию - текущее время)
+            extension: Расширение файла (по умолчанию .xlsx)
 
         Returns:
             Path: Путь для сохранения файла
@@ -53,8 +54,10 @@ class PriceFileStorage:
         # Очищаем старые файлы перед сохранением нового
         self._cleanup_old_files(vendor_dir, timestamp)
 
-        # Формируем имя файла
-        filename = f"{vendor}_price_{timestamp.strftime('%Y%m%d_%H%M')}.xlsx"
+        # Формируем имя файла с правильным расширением
+        if not extension.startswith('.'):
+            extension = f'.{extension}'
+        filename = f"{vendor}_price_{timestamp.strftime('%Y%m%d_%H%M')}{extension}"
         return vendor_dir / filename
 
     def _cleanup_old_files(self, month_dir: Path, current_timestamp: datetime):
