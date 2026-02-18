@@ -3,6 +3,7 @@ import requests
 from pathlib import Path
 from datetime import datetime
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse
 
 from domain.interfaces.downloader import IDownloader
 from utils.file_storage import PriceFileStorage
@@ -45,7 +46,11 @@ class BaseDownloader(IDownloader, ABC):
 
     def _download_file(self, url: str, vendor: str) -> Path:
         """Загружает файл по URL"""
-        file_path = self.storage.get_storage_path(vendor)
+        # Определяем расширение из URL источника
+        url_path = urlparse(url).path
+        extension = Path(url_path).suffix or '.xlsx'
+        logger.info(f"[FIX] Расширение из URL: {extension} (URL: {url})")
+        file_path = self.storage.get_storage_path(vendor, extension=extension)
 
         response = self.session.get(url, stream=True, timeout=60)
         response.raise_for_status()

@@ -96,23 +96,30 @@ class SyncService:
             logger.info(f"📊 Статистика артикулов: БД={len(current_articles)}, "
                        f"Файл={len(new_articles)}, Исчезло={len(disappeared_articles)}")
 
-            # Обновленные позиции (изменилась цена, и новая цена > 0)
+            # Обновленные позиции (изменилась цена или описание, и новая цена > 0)
             to_update = []
             for article in (new_articles_with_price & current_articles):
                 new_item = new_items_with_price_map[article]
                 old_item = current_items_map[article]
-                if new_item.has_price_changed(old_item, self.price_change_threshold):
+                price_changed = new_item.has_price_changed(old_item, self.price_change_threshold)
+                desc_changed = (new_item.description or '') != (old_item.description or '')
+                if price_changed or desc_changed:
                     to_update.append(new_item)
 
-            # 5. Применяем изменения
+            # 5. Загружаем маппинг синонимов для VendorForFilter
+            synonyms_map = {}
+            if hasattr(self.repository, 'get_synonyms_cached'):
+                synonyms_map = self.repository.get_synonyms_cached()
+
+            # 6. Применяем изменения
             if to_add:
-                added = self.repository.add_items(to_add)
+                added = self.repository.add_items(to_add, synonyms_map=synonyms_map)
                 result.new_items = added
                 result.added_items = to_add
                 logger.info(f"➕ Добавлено новых: {added}")
 
             if to_update:
-                updated = self.repository.update_items(to_update)
+                updated = self.repository.update_items(to_update, synonyms_map=synonyms_map)
                 result.updated_items = updated
                 result.updated_items_list = to_update
                 logger.info(f"🔄 Обновлено цен: {updated}")

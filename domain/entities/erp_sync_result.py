@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Dict
 
 
 @dataclass
@@ -14,6 +14,10 @@ class ErpSyncResult:
     errors: int = 0
     duplicate_codes: List[str] = field(default_factory=list)
     error_details: List[str] = field(default_factory=list)
+
+    # Детали для отчёта: что именно добавлено/привязано
+    added_details: List[Dict[str, str]] = field(default_factory=list)
+    linked_details: List[Dict[str, str]] = field(default_factory=list)
 
     @property
     def has_duplicates(self) -> bool:

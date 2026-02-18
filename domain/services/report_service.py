@@ -4,6 +4,7 @@ from datetime import datetime
 import pandas as pd
 from typing import List
 from domain.entities.sync_result import SyncResult
+from domain.entities.erp_sync_result import ErpSyncResult
 
 
 class ReportService:
@@ -82,3 +83,60 @@ class ReportService:
         }
         df = pd.DataFrame(summary)
         df.to_excel(writer, sheet_name='Сводка', index=False)
+
+    def create_erp_report(self, result: ErpSyncResult) -> Path:
+        """
+        Создаёт Excel отчёт по результатам ERP-синхронизации.
+
+        Листы: Добавленные, Привязанные ArticlePC, Сводка.
+        """
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+        filename = f"report_ERP_{timestamp}.xlsx"
+        filepath = self.reports_dir / filename
+
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            if result.added_details:
+                data = [
+                    {
+                        'Производитель': item['vendor'],
+                        'Артикул': item['part_num'],
+                        'Наименование': item['name'],
+                        'Код 1C (ArticlePC)': item['article_pc'],
+                    }
+                    for item in result.added_details
+                ]
+                pd.DataFrame(data).to_excel(writer, sheet_name='Добавленные', index=False)
+
+            if result.linked_details:
+                data = [
+                    {
+                        'Производитель': item['vendor'],
+                        'Артикул': item['part_num'],
+                        'Наименование': item.get('name', ''),
+                        'Код 1C (ArticlePC)': item['article_pc'],
+                    }
+                    for item in result.linked_details
+                ]
+                pd.DataFrame(data).to_excel(writer, sheet_name='Привязанные ArticlePC', index=False)
+
+            summary = {
+                'Параметр': [
+                    'Получено из 1C',
+                    'Добавлено новых',
+                    'Привязано ArticlePC',
+                    'Пропущено (уже есть)',
+                    'Дубликатов кодов',
+                    'Ошибок',
+                ],
+                'Значение': [
+                    result.total_received,
+                    result.added,
+                    result.updated,
+                    result.skipped_existing,
+                    result.skipped_duplicates,
+                    result.errors,
+                ]
+            }
+            pd.DataFrame(summary).to_excel(writer, sheet_name='Сводка', index=False)
+
+        return filepath

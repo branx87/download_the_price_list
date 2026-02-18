@@ -20,6 +20,11 @@ from bot.handlers import (
     vendors_command,
     help_command,
     erp_command,
+    db_copy_command,
+    synonyms_command,
+    add_synonym_command,
+    del_synonym_command,
+    backfill_vff_command,
     button_callback
 )
 
@@ -75,6 +80,11 @@ def main():
     app.add_handler(CommandHandler("vendors", vendors_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("erp", erp_command))
+    app.add_handler(CommandHandler("db_copy", db_copy_command))
+    app.add_handler(CommandHandler("synonyms", synonyms_command))
+    app.add_handler(CommandHandler("add_synonym", add_synonym_command))
+    app.add_handler(CommandHandler("del_synonym", del_synonym_command))
+    app.add_handler(CommandHandler("backfill_vff", backfill_vff_command))
 
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_callback))

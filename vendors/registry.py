@@ -7,6 +7,7 @@ from adapters.downloaders.auth_http import AuthHttpDownloader
 from adapters.downloaders.iek_downloader import IekDownloader
 from adapters.downloaders.chint_downloader import ChintDownloader
 from adapters.downloaders.ekf_downloader import EkfDownloader
+from adapters.downloaders.owen_downloader import OwenDownloader
 from adapters.parsers.excel_parser import ExcelParser
 from utils.normalizer import ArticleNormalizer
 from adapters.downloaders.dkc_downloader import DkcDownloader
@@ -54,16 +55,17 @@ class VendorRegistry:
 
             'ОВЕН': VendorConfig(
                 name='ОВЕН',
-                downloader_class=SimpleHttpDownloader,
+                downloader_class=OwenDownloader,
                 downloader_params={
                     'download_dir': self.download_dir,
                     'url': 'https://owen.ru/downloads/price_owen.xlsx'
                 },
                 parser_config={
                     'engine': 'openpyxl',
+                    'concat_article_to_description': True,
                     'columns': {
                         'article': 'Артикул',
-                        'description': 'Наименование рабочее',
+                        'description': 'Наименование полное',
                         'price': 'Цена с НДС',
                         'units': 'шт',
                         'storage': 'Срок поставки'

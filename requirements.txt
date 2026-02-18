@@ -6,3 +6,5 @@ xlrd>=2.0.0
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 python-dotenv>=1.0.0
+db-to-sqlite>=1.5
+pyodbc>=5.0.0

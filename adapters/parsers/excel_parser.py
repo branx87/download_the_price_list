@@ -349,6 +349,12 @@ class ExcelParser(IParser):
                         desc_val = desc_val.iloc[0] if len(desc_val) > 0 else ''
                     description = self.data_normalizer.normalize_description(str(desc_val) if desc_val and not pd.isna(desc_val) else '')
 
+                # Сцепляем наименование и артикул: "Наименование (Артикул)"
+                if self.config.get('concat_article_to_description') and description and article_str:
+                    description = f"{description} ({article_str})"
+                    if idx < 3:
+                        logger.info(f"[FIX] ОВЕН concat: '{description}'")
+
                 # Извлекаем и нормализуем единицы измерения
                 unit = 'шт'
                 if unit_col in df.columns:

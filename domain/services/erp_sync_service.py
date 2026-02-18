@@ -5,6 +5,7 @@ from typing import List
 from adapters.erp.erp_client import ErpClient
 from adapters.database.sql_repository import SqlRepository
 from domain.entities.erp_sync_result import ErpSyncResult
+from domain.services.data_normalizer import DataNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,12 @@ class ErpSyncService:
                 if len(duplicate_codes) > 10:
                     logger.warning(f"  ... и ещё {len(duplicate_codes) - 10}")
 
-            # 3. Загружаем существующие данные из БД для быстрого поиска
+            # 3. Загружаем маппинг синонимов для VendorForFilter
+            synonyms_map = {}
+            if hasattr(self.repository, 'get_synonyms_cached'):
+                synonyms_map = self.repository.get_synonyms_cached()
+
+            # 4. Загружаем существующие данные из БД для быстрого поиска
             logger.debug("Загрузка существующих ArticlePC из БД...")
             existing_article_pcs = self.repository.get_all_article_pcs()
             logger.debug(f"В БД найдено {len(existing_article_pcs)} ArticlePC")
@@ -64,10 +70,14 @@ class ErpSyncService:
             for item in unique_items:
                 try:
                     code = (item.get('code') or '').strip()
-                    manufacturer = (item.get('manufacturer') or '').strip()
+                    manufacturer_raw = (item.get('manufacturer') or '').strip()
+                    manufacturer = DataNormalizer.normalize_vendor_name(manufacturer_raw)
                     article = (item.get('article') or '').strip()
                     name = (item.get('name') or '').strip()
                     unit = (item.get('unit') or 'шт').strip()
+
+                    if manufacturer_raw != manufacturer:
+                        logger.debug(f"[FIX] Нормализация производителя: '{manufacturer_raw}' -> '{manufacturer}'")
 
                     if not code or not manufacturer or not article:
                         logger.debug(f"Пропуск позиции без обязательных полей: code={code}, "
@@ -83,7 +93,7 @@ class ErpSyncService:
                         result.skipped_existing += 1
                         continue
 
-                    # Шаг 2: Найден по Vendor+Part_Num → добавляем ArticlePC
+                    # Шаг 2: Найден по Vendor+Part_Num → привязываем ArticlePC
                     if (manufacturer, article) in existing_pairs:
                         to_update_article_pc.append({
                             'vendor': manufacturer,
@@ -92,6 +102,13 @@ class ErpSyncService:
                         })
                         existing_article_pcs.add(code)
                         result.updated += 1
+                        result.linked_details.append({
+                            'vendor': manufacturer,
+                            'part_num': article,
+                            'article_pc': code,
+                            'name': name
+                        })
+                        logger.info(f"[ERP] Привязка ArticlePC: {manufacturer} | {article} -> код {code}")
                         continue
 
                     # Шаг 3: Нигде не найден → INSERT
@@ -100,11 +117,19 @@ class ErpSyncService:
                         'part_num': article,
                         'descr': name,
                         'units': unit,
-                        'article_pc': code
+                        'article_pc': code,
+                        'vendor_for_filter': synonyms_map.get(manufacturer, '1C-ERP')
                     })
                     existing_article_pcs.add(code)
                     existing_pairs.add((manufacturer, article))
                     result.added += 1
+                    result.added_details.append({
+                        'vendor': manufacturer,
+                        'part_num': article,
+                        'article_pc': code,
+                        'name': name
+                    })
+                    logger.info(f"[ERP] Новая позиция: {manufacturer} | {article} | {name} | код {code}")
 
                 except Exception as e:
                     result.errors += 1

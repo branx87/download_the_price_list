@@ -11,11 +11,34 @@ class Settings:
     PRICE_FILES_DIR = PROJECT_ROOT / "price_files"
     LOG_DIR = PROJECT_ROOT / "logs"
 
-    DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///./prices.db')
+    @property
+    def DATABASE_URL(self):
+        """Строит connection string для MSSQL из настроек, или берёт из env"""
+        url = os.getenv('DATABASE_URL', '')
+        if url:
+            return url
+        if not self.MSSQL_SERVER:
+            return 'sqlite:///./prices.db'  # fallback для локальной разработки
+        from urllib.parse import quote_plus
+        driver = "ODBC Driver 18 for SQL Server"
+        trust = "yes" if self.MSSQL_TRUST_CERT == "yes" else "no"
+        params = quote_plus(
+            f"DRIVER={{{driver}}};SERVER={self.MSSQL_SERVER};"
+            f"DATABASE={self.MSSQL_DATABASE};UID={self.MSSQL_USERNAME};"
+            f"PWD={self.MSSQL_PASSWORD};TrustServerCertificate={trust}"
+        )
+        return f"mssql+pyodbc:///?odbc_connect={params}"
     BOT_TOKEN = os.getenv('BOT_TOKEN', '')
     DKC_LOGIN = os.getenv('DKC_LOGIN', 'branx')
     DKC_PASSWORD = os.getenv('DKC_PASSWORD', '11051987')
     PRICE_CHANGE_THRESHOLD = 0.01
+
+    # MSSQL настройки
+    MSSQL_SERVER = os.getenv('MSSQL_SERVER', '')
+    MSSQL_DATABASE = os.getenv('MSSQL_DATABASE', 'Total_Price')
+    MSSQL_USERNAME = os.getenv('MSSQL_USERNAME', 'sa')
+    MSSQL_PASSWORD = os.getenv('MSSQL_PASSWORD', '')
+    MSSQL_TRUST_CERT = os.getenv('MSSQL_TRUST_CERT', 'yes')
 
     # 1C-ERP интеграция
     ONE_C_LOGIN = os.getenv('ONE_C_LOGIN', '')

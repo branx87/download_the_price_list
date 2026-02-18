@@ -13,10 +13,16 @@ from domain.services.sync_service import SyncService
 from domain.services.report_service import ReportService
 from adapters.erp.erp_client import ErpClient
 from domain.services.erp_sync_service import ErpSyncService
+from domain.services.report_service import ReportService
 
 
 
 logger = logging.getLogger(__name__)
+
+# Хранилище последнего ErpSyncResult для генерации отчёта по кнопке
+_last_erp_result = {
+    'result': None,
+}
 
 PROJECT_ROOT = settings.PROJECT_ROOT
 
@@ -61,6 +67,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /check - Проверить актуальность прайса
 /check_all - Проверить все прайсы
 /erp - Обновить номенклатуру из 1C-ERP
+/synonyms - Синонимы вендоров
+/add_synonym - Добавить синоним
+/del_synonym - Удалить синоним
+/backfill_vff - Заполнить VendorForFilter
+/db_copy - Скопировать БД из MSSQL
 /status - Статус
 /debug - Показать ошибки
 /help - Справка"""
@@ -329,6 +340,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /check - Проверить актуальность прайса
 /check_all - Проверить все прайсы
 /erp - Обновить номенклатуру из 1C-ERP
+/synonyms - Показать синонимы вендоров
+/add_synonym <Vendor> <VendorForFilter> - Добавить синоним
+/del_synonym - Удалить синоним
+/backfill_vff - Заполнить VendorForFilter
+/db_copy - Скопировать БД из MSSQL
 /status - Статус синхронизаций
 /debug - Показать ошибки
 /help - Справка
@@ -336,6 +352,100 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 Используйте /check чтобы посмотреть какие изменения будут при синхронизации"""
 
     await update.message.reply_text(text)
+
+
+async def db_copy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /db_copy - скопировать БД из MSSQL в SQLite"""
+    if not settings.MSSQL_SERVER:
+        await update.message.reply_text("❌ MSSQL_SERVER не настроен в .env")
+        return
+
+    if sync_status['is_running']:
+        await update.message.reply_text(f"⚠️ Уже идет операция: {sync_status['current_vendor']}")
+        return
+
+    sync_status['is_running'] = True
+    sync_status['current_vendor'] = 'MSSQL копирование'
+
+    # Формируем строку подключения MSSQL
+    driver = "ODBC+Driver+18+for+SQL+Server"
+    trust = "yes" if settings.MSSQL_TRUST_CERT == "yes" else "no"
+    mssql_url = (
+        f"mssql+pyodbc://{settings.MSSQL_USERNAME}:{settings.MSSQL_PASSWORD}"
+        f"@{settings.MSSQL_SERVER}/{settings.MSSQL_DATABASE}"
+        f"?driver={driver}&TrustServerCertificate={trust}"
+    )
+
+    # Файл назначения — рабочая БД бота
+    output_file = str(settings.PROJECT_ROOT / "prices.db")
+
+    await update.message.reply_text(
+        f"🔄 Копирую БД из MSSQL...\n"
+        f"📡 Сервер: {settings.MSSQL_SERVER}\n"
+        f"📦 База: {settings.MSSQL_DATABASE}\n"
+        f"💾 Файл: prices.db\n\n"
+        f"Это может занять некоторое время..."
+    )
+
+    try:
+        result = subprocess.run(
+            ["db-to-sqlite", mssql_url, output_file, "--all", "-p"],
+            capture_output=True,
+            text=True,
+            timeout=1800,  # 30 минут — копирование большой БД
+            cwd=str(settings.PROJECT_ROOT),
+            encoding='utf-8',
+            errors='replace'
+        )
+
+        sync_status['last_stdout'] = result.stdout or ""
+        sync_status['last_stderr'] = result.stderr or ""
+        sync_status['last_returncode'] = result.returncode
+
+        if result.returncode == 0:
+            logger.info(f"[FIX] MSSQL -> SQLite копирование завершено успешно")
+
+            # Инициализируем NULL статусы после копирования
+            try:
+                repo = SqlRepository(settings.DATABASE_URL)
+                fixed = repo.fix_null_statuses()
+                logger.info(f"[FIX] После db_copy: проставлен Status для {fixed} записей")
+            except Exception as e:
+                logger.warning(f"[FIX] Не удалось проставить статусы: {e}")
+
+            # Получаем размер файла
+            db_path = Path(output_file)
+            size_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0
+
+            await update.message.reply_text(
+                f"✅ БД скопирована!\n\n"
+                f"💾 Файл: prices.db\n"
+                f"📊 Размер: {size_mb:.1f} МБ\n"
+                f"🔧 Статусы инициализированы: {fixed} записей"
+            )
+        else:
+            logger.error(f"[FIX] MSSQL -> SQLite ошибка: {result.stderr[:500]}")
+            stderr_snippet = (result.stderr or "")[-500:]
+            await update.message.reply_text(
+                f"❌ Ошибка копирования (код {result.returncode})\n\n"
+                f"{stderr_snippet}\n\n"
+                f"Используй /debug для деталей"
+            )
+
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("⏱ Превышено время ожидания (30 мин)")
+    except FileNotFoundError:
+        logger.error("[FIX] db-to-sqlite не найден")
+        await update.message.reply_text(
+            "❌ db-to-sqlite не установлен!\n\n"
+            "Установи: pip install db-to-sqlite pyodbc"
+        )
+    except Exception as e:
+        logger.error(f"[FIX] Ошибка копирования MSSQL: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка: {str(e)[:300]}")
+    finally:
+        sync_status['is_running'] = False
+        sync_status['current_vendor'] = None
 
 
 async def erp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,6 +507,16 @@ async def _run_erp_sync(chat_id: int, message_id: int, context: ContextTypes.DEF
 
         await context.bot.send_message(chat_id=chat_id, text=report)
 
+        # Если есть детали — предлагаем отчёт вместо спама сообщениями
+        if result.added_details or result.linked_details:
+            _last_erp_result['result'] = result
+            keyboard = [[InlineKeyboardButton("📊 Нужен отчёт?", callback_data="erp_report")]]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Детальный отчёт доступен в формате Excel.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
     except Exception as e:
         logger.error(f"Ошибка синхронизации 1C-ERP: {e}", exc_info=True)
         await context.bot.send_message(
@@ -409,6 +529,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопок"""
     query = update.callback_query
     await query.answer()
+
+    if query.data.startswith('del_syn_'):
+        syn_id = int(query.data.replace('del_syn_', ''))
+        repository = SqlRepository(settings.DATABASE_URL)
+        deleted = repository.delete_synonym(syn_id)
+        if deleted:
+            await query.edit_message_text(f"Синоним ID={syn_id} удален.")
+        else:
+            await query.edit_message_text(f"Синоним ID={syn_id} не найден.")
+        return
 
     if query.data == 'erp_sync':
         if sync_status['is_running']:
@@ -426,6 +556,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sync_status['is_running'] = False
             sync_status['current_vendor'] = None
 
+        return
+
+    if query.data == 'erp_report':
+        erp_result = _last_erp_result.get('result')
+        if not erp_result:
+            await query.edit_message_text("⚠️ Нет данных для отчёта. Сначала выполните /erp")
+            return
+
+        await query.edit_message_text("📊 Формирую Excel-отчёт...")
+
+        try:
+            report_service = ReportService(settings.PROJECT_ROOT / "reports")
+            filepath = report_service.create_erp_report(erp_result)
+            logger.info(f"[FIX] ERP-отчёт создан: {filepath}")
+
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=open(filepath, 'rb'),
+                filename=filepath.name,
+                caption="📊 Отчёт ERP-синхронизации"
+            )
+            _last_erp_result['result'] = None
+        except Exception as e:
+            logger.error(f"Ошибка генерации ERP-отчёта: {e}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"❌ Ошибка создания отчёта: {str(e)[:200]}"
+            )
         return
 
     if query.data.startswith('check_'):
@@ -599,3 +757,84 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             sync_status['is_running'] = False
             sync_status['current_vendor'] = None
+
+
+async def synonyms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /synonyms - показать все синонимы вендоров"""
+    repository = SqlRepository(settings.DATABASE_URL)
+    synonyms = repository.get_all_synonyms()
+
+    if not synonyms:
+        await update.message.reply_text("Синонимов пока нет.\n\nДобавить: /add_synonym <Vendor> <VendorForFilter>")
+        return
+
+    lines = ["Синонимы вендоров:\n"]
+    current_vff = None
+    for s in synonyms:
+        if s['vendor_for_filter'] != current_vff:
+            current_vff = s['vendor_for_filter']
+            lines.append(f"\n[{current_vff}]")
+        lines.append(f"  {s['vendor']} (ID: {s['id']})")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def add_synonym_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /add_synonym <Vendor> <VendorForFilter>"""
+    args = context.args
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "Использование: /add_synonym <Vendor> <VendorForFilter>\n\n"
+            "Примеры:\n"
+            "/add_synonym ABB-AZ ABB\n"
+            "/add_synonym ABB-KZ ABB\n"
+            "/add_synonym АББ ABB"
+        )
+        return
+
+    vendor = args[0]
+    vendor_for_filter = ' '.join(args[1:])
+
+    try:
+        repository = SqlRepository(settings.DATABASE_URL)
+        repository.add_synonym(vendor, vendor_for_filter)
+        await update.message.reply_text(f"Добавлен синоним: {vendor} -> {vendor_for_filter}")
+    except Exception as e:
+        logger.error(f"Ошибка добавления синонима: {e}", exc_info=True)
+        await update.message.reply_text(f"Ошибка: {str(e)[:200]}")
+
+
+async def del_synonym_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /del_synonym - удалить синоним через inline-кнопки"""
+    repository = SqlRepository(settings.DATABASE_URL)
+    synonyms = repository.get_all_synonyms()
+
+    if not synonyms:
+        await update.message.reply_text("Синонимов нет.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"X  {s['vendor']} -> {s['vendor_for_filter']}",
+            callback_data=f"del_syn_{s['id']}"
+        )]
+        for s in synonyms
+    ]
+    await update.message.reply_text(
+        "Выберите синоним для удаления:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def backfill_vff_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /backfill_vff - заполнить VendorForFilter для всех записей"""
+    await update.message.reply_text("Заполняю VendorForFilter...")
+
+    try:
+        repository = SqlRepository(settings.DATABASE_URL)
+        synonyms_map = repository.get_synonyms_map()
+        count = repository.backfill_vendor_for_filter(synonyms_map)
+        await update.message.reply_text(f"Заполнено VendorForFilter для {count} записей.")
+    except Exception as e:
+        logger.error(f"Ошибка backfill: {e}", exc_info=True)
+        await update.message.reply_text(f"Ошибка: {str(e)[:300]}")
