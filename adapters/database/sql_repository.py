@@ -17,53 +17,96 @@ class SqlRepository(IRepository):
     """Репозиторий для работы с SQL БД через SQLAlchemy"""
 
     def __init__(self, database_url: str):
+        self.is_sqlite = 'sqlite' in database_url.lower()
         self.engine = create_engine(database_url)
         self.SessionLocal = sessionmaker(bind=self.engine)
         self.data_normalizer = DataNormalizer()
         self._synonyms_cache = None
+        if self.is_sqlite:
+            self._apply_sqlite_pragmas()
         self._ensure_indexes()
         self.cleanup_none_strings()
 
-    def _ensure_indexes(self):
-        """Создает индексы для ускорения работы с БД"""
+    def _apply_sqlite_pragmas(self):
+        """Оптимизация SQLite для быстрой записи"""
         try:
             with self.SessionLocal() as session:
-                for idx_name, idx_sql in [
-                    ('idx_vendor_article', 'CREATE INDEX idx_vendor_article ON Total_Price(Vendor, Part_Num)'),
-                    ('idx_vendor', 'CREATE INDEX idx_vendor ON Total_Price(Vendor)'),
-                ]:
-                    exists = session.execute(text(
-                        "SELECT 1 FROM sys.indexes WHERE name = :idx_name "
-                        "AND object_id = OBJECT_ID('Total_Price')"
-                    ), {'idx_name': idx_name}).fetchone()
-                    if not exists:
-                        session.execute(text(idx_sql))
+                session.execute(text("PRAGMA journal_mode = WAL"))
+                session.execute(text("PRAGMA synchronous = NORMAL"))
+                session.execute(text("PRAGMA cache_size = -64000"))  # 64MB
+                session.execute(text("PRAGMA temp_store = MEMORY"))
                 session.commit()
-                logger.info("Индексы БД проверены/созданы")
+                logger.info("[FIX] SQLite PRAGMA оптимизации применены (WAL, cache 64MB)")
+        except Exception as e:
+            logger.warning(f"Не удалось применить SQLite PRAGMA: {e}")
+
+    def _ensure_indexes(self):
+        """Создает индексы для ускорения работы с БД (SQLite и MSSQL)"""
+        indexes = [
+            ('idx_vendor_article', 'Total_Price(Vendor, Part_Num)'),
+            ('idx_vendor', 'Total_Price(Vendor)'),
+            ('idx_article_pc', 'Total_Price(ArticlePC)'),
+            ('idx_status', 'Total_Price(Status)'),
+            ('idx_vendor_status', 'Total_Price(Vendor, Status)'),
+        ]
+
+        try:
+            with self.SessionLocal() as session:
+                created = []
+                for idx_name, idx_columns in indexes:
+                    try:
+                        if self.is_sqlite:
+                            session.execute(text(
+                                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {idx_columns}"
+                            ))
+                        else:
+                            # MSSQL: проверяем через sys.indexes
+                            exists = session.execute(text(
+                                "SELECT 1 FROM sys.indexes WHERE name = :idx_name "
+                                "AND object_id = OBJECT_ID('Total_Price')"
+                            ), {'idx_name': idx_name}).fetchone()
+                            if not exists:
+                                session.execute(text(
+                                    f"CREATE INDEX {idx_name} ON {idx_columns}"
+                                ))
+                                created.append(idx_name)
+                    except Exception as e:
+                        logger.debug(f"Индекс {idx_name}: {e}")
+
+                session.commit()
+                if created:
+                    logger.info(f"[FIX] Созданы индексы: {', '.join(created)}")
+                logger.info(f"Индексы БД проверены/созданы ({len(indexes)} шт)")
         except Exception as e:
             logger.warning(f"Не удалось создать индексы: {e}")
 
     def cleanup_none_strings(self):
-        """Заменяет строки 'None' на пустые строки во всех текстовых полях"""
+        """Заменяет строки 'None' на пустые строки во всех текстовых полях.
+        Каждая колонка — отдельная транзакция, чтобы не блокировать таблицу надолго."""
         columns = ['Storage', 'Currency', 'URL', 'Labor', 'LaborCategory',
                    'ArticlePC', 'Discount', 'PriceText', 'Alt_Part_Num']
-        try:
-            with self.SessionLocal() as session:
-                total_fixed = 0
-                for col in columns:
+        total_fixed = 0
+        for col in columns:
+            try:
+                with self.SessionLocal() as session:
                     result = session.execute(
                         text(f"UPDATE Total_Price SET {col} = '' WHERE {col} = 'None'")
                     )
+                    session.commit()
                     if result.rowcount > 0:
                         logger.info(f"[FIX] Очищено {result.rowcount} значений 'None' в колонке {col}")
                         total_fixed += result.rowcount
-                session.commit()
-                if total_fixed > 0:
-                    logger.info(f"[FIX] Итого очищено {total_fixed} значений 'None' в БД")
-                else:
-                    logger.debug("[FIX] Строк 'None' в БД не обнаружено")
-        except Exception as e:
-            logger.error(f"Ошибка очистки 'None' строк: {e}")
+            except Exception as e:
+                logger.error(f"Ошибка очистки 'None' в колонке {col}: {e}")
+        if total_fixed > 0:
+            logger.info(f"[FIX] Итого очищено {total_fixed} значений 'None' в БД")
+        else:
+            logger.debug("[FIX] Строк 'None' в БД не обнаружено")
+
+    @property
+    def _nolock(self) -> str:
+        """Возвращает WITH (NOLOCK) для MSSQL, пустую строку для SQLite"""
+        return '' if self.is_sqlite else 'WITH (NOLOCK)'
 
     @staticmethod
     def _safe_str(value, default: str = "") -> str:
@@ -94,9 +137,9 @@ class SqlRepository(IRepository):
     def get_current_articles(self, vendor: str) -> Set[str]:
         """Получить все текущие артикулы вендора"""
         with self.SessionLocal() as session:
-            query = text("""
-                SELECT Part_Num 
-                FROM Total_Price 
+            query = text(f"""
+                SELECT Part_Num
+                FROM Total_Price {self._nolock}
                 WHERE Vendor = :vendor
             """)
             result = session.execute(query, {"vendor": vendor})
@@ -108,9 +151,9 @@ class SqlRepository(IRepository):
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
         with self.SessionLocal() as session:
-            query = text("""
+            query = text(f"""
                 SELECT Vendor, Part_Num, Descr, Price, Units, Storage
-                FROM Total_Price
+                FROM Total_Price {self._nolock}
                 WHERE Vendor = :vendor AND (Status IS NULL OR Status != 'disappeared')
             """)
 
@@ -138,138 +181,136 @@ class SqlRepository(IRepository):
             return items
 
     def add_items(self, items: List[PriceItem], synonyms_map: dict = None) -> int:
-        """Добавить новые позиции"""
+        """Добавить новые позиции (батчами по 500 с промежуточным commit)"""
         if not items:
             return 0
 
         synonyms_map = synonyms_map or {}
 
-        with self.SessionLocal() as session:
-            query = text("""
-                INSERT INTO Total_Price
-                (Vendor, Part_Num, Descr, Price, Units, Storage, VendorForFilter, Status, updated_at)
-                VALUES (:vendor, :article, :descr, :price, :units, :storage, :vendor_for_filter, 'new', :updated_at)
-            """)
+        query = text("""
+            INSERT INTO Total_Price
+            (Vendor, Part_Num, Descr, Price, Units, Storage, VendorForFilter, Status, updated_at)
+            VALUES (:vendor, :article, :descr, :price, :units, :storage, :vendor_for_filter, 'new', :updated_at)
+        """)
 
-            current_time = datetime.now()
+        current_time = datetime.now()
+        all_data = [
+            {
+                "vendor": self._safe_str(item.vendor),
+                "article": self._safe_str(item.article),
+                "descr": self._safe_str(item.description),
+                "price": float(item.price),
+                "units": self._safe_str(item.units, "шт"),
+                "storage": self._safe_str(item.storage),
+                "vendor_for_filter": self.resolve_vendor_for_filter(
+                    self._safe_str(item.vendor), synonyms_map
+                ),
+                "updated_at": current_time
+            }
+            for item in items
+        ]
+
+        batch_size = 500
+        total = 0
+        for i in range(0, len(all_data), batch_size):
+            batch = all_data[i:i + batch_size]
+            with self.SessionLocal() as session:
+                connection = session.connection()
+                connection.execute(query, batch)
+                session.commit()
+                total += len(batch)
+
+        return total
+
+    def update_items(self, items: List[PriceItem], synonyms_map: dict = None) -> int:
+        """Обновить существующие позиции (батчами по 500 с промежуточным commit)"""
+        if not items:
+            return 0
+
+        synonyms_map = synonyms_map or {}
+        current_time = datetime.now()
+
+        query = text("""
+            UPDATE Total_Price
+            SET Price = :price,
+                Descr = :descr,
+                Units = :units,
+                Storage = :storage,
+                VendorForFilter = :vendor_for_filter,
+                Status = 'price_changed',
+                updated_at = :updated_at
+            WHERE Vendor = :vendor AND Part_Num = :article
+        """)
+
+        updated_count = 0
+        batch_size = 500
+        for i in range(0, len(items), batch_size):
+            batch = items[i:i + batch_size]
             data = [
                 {
-                    "vendor": self._safe_str(item.vendor),
-                    "article": self._safe_str(item.article),
-                    "descr": self._safe_str(item.description),
                     "price": float(item.price),
+                    "descr": self._safe_str(item.description),
                     "units": self._safe_str(item.units, "шт"),
                     "storage": self._safe_str(item.storage),
+                    "vendor": self._safe_str(item.vendor),
+                    "article": self._safe_str(item.article),
                     "vendor_for_filter": self.resolve_vendor_for_filter(
                         self._safe_str(item.vendor), synonyms_map
                     ),
                     "updated_at": current_time
                 }
-                for item in items
+                for item in batch
             ]
 
-            connection = session.connection()
-            connection.execute(query, data)
-            session.commit()
-            return len(items)
+            with self.SessionLocal() as session:
+                connection = session.connection()
+                connection.execute(query, data)
+                session.commit()
+                updated_count += len(batch)
 
-    def update_items(self, items: List[PriceItem], synonyms_map: dict = None) -> int:
-        """Обновить существующие позиции (оптимизированная batch версия)"""
-        if not items:
-            return 0
-
-        synonyms_map = synonyms_map or {}
-
-        with self.SessionLocal() as session:
-            current_time = datetime.now()
-
-            updated_count = 0
-
-            if items:
-                batch_size = 1000
-                for i in range(0, len(items), batch_size):
-                    batch = items[i:i + batch_size]
-                    data = [
-                        {
-                            "price": float(item.price),
-                            "descr": self._safe_str(item.description),
-                            "units": self._safe_str(item.units, "шт"),
-                            "storage": self._safe_str(item.storage),
-                            "vendor": self._safe_str(item.vendor),
-                            "article": self._safe_str(item.article),
-                            "vendor_for_filter": self.resolve_vendor_for_filter(
-                                self._safe_str(item.vendor), synonyms_map
-                            ),
-                            "updated_at": current_time
-                        }
-                        for item in batch
-                    ]
-
-                    query = text("""
-                        UPDATE Total_Price
-                        SET Price = :price,
-                            Descr = :descr,
-                            Units = :units,
-                            Storage = :storage,
-                            VendorForFilter = :vendor_for_filter,
-                            Status = 'price_changed',
-                            updated_at = :updated_at
-                        WHERE Vendor = :vendor AND Part_Num = :article
-                    """)
-
-                    connection = session.connection()
-                    connection.execute(query, data)
-                    updated_count += len(batch)
-
-                    if i % 5000 == 0 and i > 0:
-                        session.flush()
-
-            session.commit()
-            return updated_count
+        return updated_count
 
     def mark_as_disappeared(self, vendor: str, articles: List[str]) -> int:
-        """Пометить позиции как исчезнувшие (оптимизированная batch версия)"""
+        """Пометить позиции как исчезнувшие (батчами по 500 с промежуточным commit)"""
         if not articles:
             return 0
 
         # Нормализуем vendor name
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+        current_time = datetime.now()
 
-        with self.SessionLocal() as session:
-            current_time = datetime.now()
+        batch_size = 500
+        updated_count = 0
 
-            batch_size = 2000
-            updated_count = 0
+        for i in range(0, len(articles), batch_size):
+            batch = articles[i:i + batch_size]
 
-            for i in range(0, len(articles), batch_size):
-                batch = articles[i:i + batch_size]
+            # Формируем плейсхолдеры для IN clause (артикулы)
+            article_placeholders = ', '.join([f':article{j}' for j in range(len(batch))])
 
-                # Формируем плейсхолдеры для IN clause (артикулы)
-                article_placeholders = ', '.join([f':article{j}' for j in range(len(batch))])
+            query = text(f"""
+                UPDATE Total_Price
+                SET Status = 'disappeared',
+                    updated_at = :updated_at
+                WHERE Vendor = :vendor
+                AND Part_Num IN ({article_placeholders})
+            """)
 
-                query = text(f"""
-                    UPDATE Total_Price
-                    SET Status = 'disappeared',
-                        updated_at = :updated_at
-                    WHERE Vendor = :vendor
-                    AND Part_Num IN ({article_placeholders})
-                """)
+            # Формируем параметры
+            params = {'vendor': vendor_normalized}
+            params.update({f'article{j}': art for j, art in enumerate(batch)})
+            params['updated_at'] = current_time
 
-                # Формируем параметры
-                params = {'vendor': vendor_normalized}
-                params.update({f'article{j}': art for j, art in enumerate(batch)})
-                params['updated_at'] = current_time
-
+            with self.SessionLocal() as session:
                 result = session.execute(query, params)
+                session.commit()
                 updated_count += result.rowcount
 
-            session.commit()
+        # Debug: логируем если обновлено меньше чем ожидалось
+        if updated_count < len(articles):
+            logger.warning(f"⚠️ Обновлено {updated_count} из {len(articles)} исчезнувших позиций")
 
-            # Debug: логируем если обновлено меньше чем ожидалось
-            if updated_count < len(articles):
-                logger.warning(f"⚠️ Обновлено {updated_count} из {len(articles)} исчезнувших позиций")
-
-            return updated_count
+        return updated_count
 
     def delete_old_disappeared(self, vendor: str, days: int = 30):
         # Нормализуем vendor name
@@ -293,9 +334,9 @@ class SqlRepository(IRepository):
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
         with self.SessionLocal() as session:
-            query = text("""
+            query = text(f"""
                 SELECT MAX(updated_at)
-                FROM Total_Price
+                FROM Total_Price {self._nolock}
                 WHERE Vendor = :vendor
             """)
 
@@ -313,9 +354,9 @@ class SqlRepository(IRepository):
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
         with self.SessionLocal() as session:
-            query = text("""
+            query = text(f"""
                 SELECT COUNT(*)
-                FROM Total_Price
+                FROM Total_Price {self._nolock}
                 WHERE Vendor = :vendor
             """)
 
@@ -327,8 +368,8 @@ class SqlRepository(IRepository):
     def find_by_article_pc(self, article_pc: str) -> bool:
         """Проверяет, существует ли запись с данным ArticlePC"""
         with self.SessionLocal() as session:
-            query = text("""
-                SELECT 1 FROM Total_Price
+            query = text(f"""
+                SELECT 1 FROM Total_Price {self._nolock}
                 WHERE ArticlePC = :article_pc
             """)
             result = session.execute(query, {'article_pc': article_pc}).fetchone()
@@ -337,8 +378,8 @@ class SqlRepository(IRepository):
     def find_by_vendor_part_num(self, vendor: str, part_num: str) -> bool:
         """Проверяет, существует ли запись по Vendor + Part_Num"""
         with self.SessionLocal() as session:
-            query = text("""
-                SELECT 1 FROM Total_Price
+            query = text(f"""
+                SELECT 1 FROM Total_Price {self._nolock}
                 WHERE Vendor = :vendor AND Part_Num = :part_num
             """)
             result = session.execute(query, {'vendor': vendor, 'part_num': part_num}).fetchone()
@@ -364,7 +405,11 @@ class SqlRepository(IRepository):
 
     def add_erp_items(self, items: list) -> int:
         """
-        Batch INSERT позиций из 1C-ERP.
+        Безопасный batch INSERT позиций из 1C-ERP.
+
+        Если запись уже существует (Vendor+Part_Num) — обновляет ТОЛЬКО ArticlePC,
+        не трогая Price, LaborCategory и другие поля.
+        Операции разбиты на мелкие транзакции для снижения блокировок MSSQL.
 
         Каждый элемент items — dict с ключами:
         vendor, part_num, descr, units, article_pc, vendor_for_filter
@@ -372,71 +417,155 @@ class SqlRepository(IRepository):
         if not items:
             return 0
 
+        current_time = datetime.now()
+
+        # Шаг 1: Подготовка данных
+        items_prepared = [
+            {
+                'vendor': self._safe_str(item['vendor']),
+                'part_num': self._safe_str(item['part_num']),
+                'descr': self._safe_str(item['descr']),
+                'units': self._safe_str(item['units'], 'шт'),
+                'article_pc': self._safe_str(item['article_pc']),
+                'vendor_for_filter': self._safe_str(item.get('vendor_for_filter', '1C-ERP')),
+            }
+            for item in items
+        ]
+
+        # Шаг 2: Pre-check — какие записи уже есть в БД (отдельная транзакция, NOLOCK)
+        vendors_in_batch = set(i['vendor'] for i in items_prepared)
+        existing_in_db = set()
+
         with self.SessionLocal() as session:
-            query = text("""
+            for vendor in vendors_in_batch:
+                parts_for_vendor = [i['part_num'] for i in items_prepared if i['vendor'] == vendor]
+                for j in range(0, len(parts_for_vendor), 500):
+                    batch_parts = parts_for_vendor[j:j + 500]
+                    placeholders = ', '.join([f':p{k}' for k in range(len(batch_parts))])
+                    params = {'vendor': vendor}
+                    params.update({f'p{k}': p for k, p in enumerate(batch_parts)})
+
+                    result = session.execute(text(f"""
+                        SELECT Part_Num FROM Total_Price {self._nolock}
+                        WHERE Vendor = :vendor AND Part_Num IN ({placeholders})
+                    """), params)
+                    for row in result:
+                        existing_in_db.add((vendor, row[0]))
+
+        # Шаг 3: Разделяем — новые vs уже существующие
+        to_insert = []
+        to_update_pc = []
+        for item in items_prepared:
+            key = (item['vendor'], item['part_num'])
+            if key in existing_in_db:
+                to_update_pc.append(item)
+            else:
+                to_insert.append(item)
+
+        # Шаг 4: UPDATE ArticlePC для существующих (батчами по 200, не трогаем Price/LaborCategory)
+        if to_update_pc:
+            update_query = text("""
+                UPDATE Total_Price
+                SET ArticlePC = :article_pc,
+                    updated_at = :updated_at
+                WHERE Vendor = :vendor AND Part_Num = :part_num
+                AND (ArticlePC IS NULL OR ArticlePC = '')
+            """)
+            batch_size = 200
+            for i in range(0, len(to_update_pc), batch_size):
+                batch = to_update_pc[i:i + batch_size]
+                update_data = [
+                    {
+                        'article_pc': item['article_pc'],
+                        'vendor': item['vendor'],
+                        'part_num': item['part_num'],
+                        'updated_at': current_time
+                    }
+                    for item in batch
+                ]
+                with self.SessionLocal() as session:
+                    connection = session.connection()
+                    connection.execute(update_query, update_data)
+                    session.commit()
+            logger.info(f"[FIX] ERP: {len(to_update_pc)} записей уже существовали — обновлён только ArticlePC")
+
+        # Шаг 5: INSERT только реально новых записей (батчами по 200)
+        inserted = 0
+        if to_insert:
+            insert_query = text("""
                 INSERT INTO Total_Price
                 (Vendor, Part_Num, Descr, Price, Units, PriceText, ArticlePC, VendorForFilter, Status, updated_at)
                 VALUES (:vendor, :part_num, :descr, 0, :units, :price_text, :article_pc, :vendor_for_filter, 'active', :updated_at)
             """)
+            batch_size = 200
+            for i in range(0, len(to_insert), batch_size):
+                batch = to_insert[i:i + batch_size]
+                insert_data = [
+                    {
+                        'vendor': item['vendor'],
+                        'part_num': item['part_num'],
+                        'descr': item['descr'],
+                        'units': item['units'],
+                        'price_text': 'Цена по запросу',
+                        'article_pc': item['article_pc'],
+                        'vendor_for_filter': item['vendor_for_filter'],
+                        'updated_at': current_time
+                    }
+                    for item in batch
+                ]
+                with self.SessionLocal() as session:
+                    connection = session.connection()
+                    connection.execute(insert_query, insert_data)
+                    session.commit()
+                    inserted += len(batch)
 
-            current_time = datetime.now()
-            data = [
-                {
-                    'vendor': self._safe_str(item['vendor']),
-                    'part_num': self._safe_str(item['part_num']),
-                    'descr': self._safe_str(item['descr']),
-                    'units': self._safe_str(item['units'], 'шт'),
-                    'price_text': 'Цена по запросу',
-                    'article_pc': self._safe_str(item['article_pc']),
-                    'vendor_for_filter': self._safe_str(item.get('vendor_for_filter', '1C-ERP')),
-                    'updated_at': current_time
-                }
-                for item in items
-            ]
-
-            connection = session.connection()
-            connection.execute(query, data)
-            session.commit()
-            return len(items)
+        return inserted
 
     def bulk_set_article_pc(self, items: list) -> int:
         """
         Batch UPDATE ArticlePC для записей найденных по Vendor+Part_Num.
+        Обрабатывает батчами по 200 с промежуточным commit для снижения блокировок.
 
         Каждый элемент items — dict с ключами: vendor, part_num, article_pc
         """
         if not items:
             return 0
 
-        with self.SessionLocal() as session:
-            query = text("""
-                UPDATE Total_Price
-                SET ArticlePC = :article_pc,
-                    updated_at = :updated_at
-                WHERE Vendor = :vendor AND Part_Num = :part_num
-            """)
+        query = text("""
+            UPDATE Total_Price
+            SET ArticlePC = :article_pc,
+                updated_at = :updated_at
+            WHERE Vendor = :vendor AND Part_Num = :part_num
+        """)
 
-            current_time = datetime.now()
-            data = [
-                {
-                    'article_pc': self._safe_str(item['article_pc']),
-                    'vendor': self._safe_str(item['vendor']),
-                    'part_num': self._safe_str(item['part_num']),
-                    'updated_at': current_time
-                }
-                for item in items
-            ]
+        current_time = datetime.now()
+        all_data = [
+            {
+                'article_pc': self._safe_str(item['article_pc']),
+                'vendor': self._safe_str(item['vendor']),
+                'part_num': self._safe_str(item['part_num']),
+                'updated_at': current_time
+            }
+            for item in items
+        ]
 
-            connection = session.connection()
-            connection.execute(query, data)
-            session.commit()
-            return len(items)
+        batch_size = 200
+        total = 0
+        for i in range(0, len(all_data), batch_size):
+            batch = all_data[i:i + batch_size]
+            with self.SessionLocal() as session:
+                connection = session.connection()
+                connection.execute(query, batch)
+                session.commit()
+                total += len(batch)
+
+        return total
 
     def get_all_article_pcs(self) -> set:
         """Получить все существующие ArticlePC из БД"""
         with self.SessionLocal() as session:
-            query = text("""
-                SELECT ArticlePC FROM Total_Price
+            query = text(f"""
+                SELECT ArticlePC FROM Total_Price {self._nolock}
                 WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
             """)
             result = session.execute(query)
@@ -445,8 +574,8 @@ class SqlRepository(IRepository):
     def get_all_vendor_part_num_pairs(self) -> set:
         """Получить все существующие пары Vendor+Part_Num"""
         with self.SessionLocal() as session:
-            query = text("""
-                SELECT Vendor, Part_Num FROM Total_Price
+            query = text(f"""
+                SELECT Vendor, Part_Num FROM Total_Price {self._nolock}
             """)
             result = session.execute(query)
             return {(row[0], row[1]) for row in result}

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -478,7 +479,8 @@ async def _run_erp_sync(chat_id: int, message_id: int, context: ContextTypes.DEF
         repository = SqlRepository(settings.DATABASE_URL)
         service = ErpSyncService(erp_client, repository)
 
-        result = service.sync_from_erp()
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, service.sync_from_erp)
 
         # Формируем отчет
         report_lines = ["📊 Результат загрузки из 1C-ERP:"]

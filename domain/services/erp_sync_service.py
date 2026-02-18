@@ -66,8 +66,9 @@ class ErpSyncService:
             # 4. Классифицируем позиции
             to_insert = []
             to_update_article_pc = []
+            total_items = len(unique_items)
 
-            for item in unique_items:
+            for idx, item in enumerate(unique_items):
                 try:
                     code = (item.get('code') or '').strip()
                     manufacturer_raw = (item.get('manufacturer') or '').strip()
@@ -108,7 +109,7 @@ class ErpSyncService:
                             'article_pc': code,
                             'name': name
                         })
-                        logger.info(f"[ERP] Привязка ArticlePC: {manufacturer} | {article} -> код {code}")
+                        logger.debug(f"[ERP] Привязка ArticlePC: {manufacturer} | {article} -> код {code}")
                         continue
 
                     # Шаг 3: Нигде не найден → INSERT
@@ -123,18 +124,26 @@ class ErpSyncService:
                     existing_article_pcs.add(code)
                     existing_pairs.add((manufacturer, article))
                     result.added += 1
-                    result.added_details.append({
-                        'vendor': manufacturer,
-                        'part_num': article,
-                        'article_pc': code,
-                        'name': name
-                    })
-                    logger.info(f"[ERP] Новая позиция: {manufacturer} | {article} | {name} | код {code}")
+                    if len(result.added_details) < 1000:
+                        result.added_details.append({
+                            'vendor': manufacturer,
+                            'part_num': article,
+                            'article_pc': code,
+                            'name': name
+                        })
+                    logger.debug(f"[ERP] Новая позиция: {manufacturer} | {article} | {name} | код {code}")
 
                 except Exception as e:
                     result.errors += 1
                     result.error_details.append(f"Ошибка обработки позиции {item.get('code', '?')}: {e}")
                     logger.error(f"Ошибка обработки позиции: {e}", exc_info=True)
+
+                # Прогресс каждые 5000 позиций
+                if (idx + 1) % 5000 == 0:
+                    logger.info(
+                        f"[ERP] Классификация: {idx + 1}/{total_items} — "
+                        f"новых: {result.added}, привязок: {result.updated}, пропущено: {result.skipped_existing}"
+                    )
 
             # 5. Применяем изменения в БД
             if to_update_article_pc:
