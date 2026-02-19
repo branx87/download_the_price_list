@@ -85,8 +85,8 @@ class SqlRepository(IRepository):
     def cleanup_none_strings(self):
         """Заменяет строки 'None' на пустые строки во всех текстовых полях.
         Каждая колонка — отдельная транзакция, чтобы не блокировать таблицу надолго."""
-        # Discount исключён - это числовое поле, не может содержать 'None'
-        columns = ['Storage', 'Currency', 'URL', 'Labor', 'LaborCategory',
+        # Discount, Labor исключены — числовые поля FLOAT, не могут содержать 'None'
+        columns = ['Storage', 'Currency', 'URL', 'LaborCategory',
                    'ArticlePC', 'PriceText', 'Alt_Part_Num']
         total_fixed = 0
         for col in columns:

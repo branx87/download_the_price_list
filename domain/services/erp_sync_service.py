@@ -63,6 +63,25 @@ class ErpSyncService:
             existing_pairs = self.repository.get_all_vendor_part_num_pairs()
             logger.debug(f"В БД найдено {len(existing_pairs)} пар Vendor+Part_Num")
 
+            # Строим lookup с учётом синонимов:
+            # {(vendor_или_canonical, part_num) -> actual_db_vendor}
+            # Пример: БД имеет ('1SE', 'ART'), синоним '1SE' -> 'SE'
+            # Добавляем ('SE', 'ART') -> '1SE', чтобы найти по canonical имени из ERP
+            pair_to_db_vendor = {}
+            synonyms_resolved = 0
+            for vendor, part_num in existing_pairs:
+                pair_to_db_vendor[(vendor, part_num)] = vendor
+                if vendor in synonyms_map:
+                    canonical = synonyms_map[vendor]
+                    if (canonical, part_num) not in pair_to_db_vendor:
+                        pair_to_db_vendor[(canonical, part_num)] = vendor
+                        synonyms_resolved += 1
+            if synonyms_resolved:
+                logger.info(
+                    f"[ERP] Lookup с синонимами: {len(pair_to_db_vendor)} ключей "
+                    f"(+{synonyms_resolved} через синонимы из {len(existing_pairs)} пар в БД)"
+                )
+
             # 4. Классифицируем позиции
             to_insert = []
             to_update_article_pc = []
@@ -100,22 +119,27 @@ class ErpSyncService:
                         result.skipped_existing += 1
                         continue
 
-                    # Шаг 2: Найден по Vendor+Part_Num → привязываем ArticlePC
-                    if (manufacturer, article) in existing_pairs:
+                    # Шаг 2: Найден по Vendor+Part_Num (с учётом синонимов) → привязываем ArticlePC
+                    if (manufacturer, article) in pair_to_db_vendor:
+                        db_vendor = pair_to_db_vendor[(manufacturer, article)]
+                        if db_vendor != manufacturer:
+                            logger.debug(
+                                f"[ERP] Найдено через синоним: '{manufacturer}' -> '{db_vendor}' | {article}"
+                            )
                         to_update_article_pc.append({
-                            'vendor': manufacturer,
+                            'vendor': db_vendor,  # Реальный вендор в БД (может быть синонимом)
                             'part_num': article,
                             'article_pc': code
                         })
                         existing_article_pcs.add(code)
                         result.updated += 1
                         result.linked_details.append({
-                            'vendor': manufacturer,
+                            'vendor': db_vendor,
                             'part_num': article,
                             'article_pc': code,
                             'name': name
                         })
-                        logger.debug(f"[ERP] Привязка ArticlePC: {manufacturer} | {article} -> код {code}")
+                        logger.debug(f"[ERP] Привязка ArticlePC: {db_vendor} | {article} -> код {code}")
                         continue
 
                     # Шаг 3: Нигде не найден → INSERT
@@ -128,7 +152,7 @@ class ErpSyncService:
                         'vendor_for_filter': synonyms_map.get(manufacturer, '1C-ERP')
                     })
                     existing_article_pcs.add(code)
-                    existing_pairs.add((manufacturer, article))
+                    pair_to_db_vendor[(manufacturer, article)] = manufacturer  # предотвращаем дубли в батче
                     result.added += 1
                     result.added_details.append({
                         'vendor': manufacturer,
