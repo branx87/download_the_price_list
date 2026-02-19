@@ -257,52 +257,107 @@ class SqlRepository(IRepository):
         return total
 
     def update_items(self, items: List[PriceItem], synonyms_map: dict = None) -> int:
-        """Обновить существующие позиции (батчами по 500 с промежуточным commit)"""
+        """
+        Обновить существующие позиции.
+
+        MSSQL: временная таблица + один JOIN UPDATE (вместо N построчных UPDATE).
+        SQLite: executemany батчами по 500.
+        """
         if not items:
             return 0
 
         synonyms_map = synonyms_map or {}
         current_time = datetime.now()
+        all_data = [
+            {
+                "price": float(item.price),
+                "descr": self._safe_str(item.description),
+                "units": self._safe_str(item.units, "шт"),
+                "storage": self._safe_str(item.storage),
+                "vendor": self._safe_str(item.vendor),
+                "article": self._safe_str(item.article),
+                "vendor_for_filter": self.resolve_vendor_for_filter(
+                    self._safe_str(item.vendor), synonyms_map
+                ),
+                "updated_at": current_time
+            }
+            for item in items
+        ]
 
-        query = text("""
-            UPDATE Total_Price
-            SET Price = :price,
-                Descr = :descr,
-                Units = :units,
-                Storage = :storage,
-                VendorForFilter = :vendor_for_filter,
-                Status = 'price_changed',
-                updated_at = :updated_at
-            WHERE Vendor = :vendor AND Part_Num = :article
-        """)
-
-        updated_count = 0
-        batch_size = 500
-        for i in range(0, len(items), batch_size):
-            batch = items[i:i + batch_size]
-            data = [
-                {
-                    "price": float(item.price),
-                    "descr": self._safe_str(item.description),
-                    "units": self._safe_str(item.units, "шт"),
-                    "storage": self._safe_str(item.storage),
-                    "vendor": self._safe_str(item.vendor),
-                    "article": self._safe_str(item.article),
-                    "vendor_for_filter": self.resolve_vendor_for_filter(
-                        self._safe_str(item.vendor), synonyms_map
-                    ),
-                    "updated_at": current_time
-                }
-                for item in batch
-            ]
-
+        if not self.is_sqlite:
+            # MSSQL: временная таблица + один JOIN UPDATE
+            start_time = time.time()
             with self.SessionLocal() as session:
-                connection = session.connection()
-                connection.execute(query, data)
-                session.commit()
-                updated_count += len(batch)
-
-        return updated_count
+                try:
+                    connection = session.connection()
+                    connection.execute(text("""
+                        CREATE TABLE #tmp_price_upd (
+                            Vendor NVARCHAR(255),
+                            Part_Num NVARCHAR(255),
+                            Price FLOAT,
+                            Descr NVARCHAR(MAX),
+                            Units NVARCHAR(255),
+                            Storage NVARCHAR(255),
+                            VendorForFilter NVARCHAR(255),
+                            updated_at DATETIME
+                        )
+                    """))
+                    batch_size = 1000
+                    for i in range(0, len(all_data), batch_size):
+                        connection.execute(text("""
+                            INSERT INTO #tmp_price_upd
+                                (Vendor, Part_Num, Price, Descr, Units, Storage, VendorForFilter, updated_at)
+                            VALUES
+                                (:vendor, :article, :price, :descr, :units, :storage, :vendor_for_filter, :updated_at)
+                        """), all_data[i:i + batch_size])
+                    result = connection.execute(text("""
+                        UPDATE tp
+                        SET tp.Price = t.Price,
+                            tp.Descr = t.Descr,
+                            tp.Units = t.Units,
+                            tp.Storage = t.Storage,
+                            tp.VendorForFilter = t.VendorForFilter,
+                            tp.Status = 'price_changed',
+                            tp.updated_at = t.updated_at
+                        FROM Total_Price tp
+                        INNER JOIN #tmp_price_upd t
+                            ON tp.Vendor = t.Vendor AND tp.Part_Num = t.Part_Num
+                    """))
+                    affected = result.rowcount
+                    connection.execute(text("DROP TABLE #tmp_price_upd"))
+                    session.commit()
+                except Exception as e:
+                    logger.error(f"[FIX] Ошибка update_items: {e}", exc_info=True)
+                    session.rollback()
+                    raise
+            elapsed = time.time() - start_time
+            logger.info(
+                f"[FIX] update_items (temp table): {affected}/{len(items)} обновлено "
+                f"за {elapsed:.1f}с ({affected / elapsed:.0f} rec/s)"
+            )
+            return affected
+        else:
+            # SQLite: executemany батчами
+            query = text("""
+                UPDATE Total_Price
+                SET Price = :price,
+                    Descr = :descr,
+                    Units = :units,
+                    Storage = :storage,
+                    VendorForFilter = :vendor_for_filter,
+                    Status = 'price_changed',
+                    updated_at = :updated_at
+                WHERE Vendor = :vendor AND Part_Num = :article
+            """)
+            updated_count = 0
+            batch_size = 500
+            for i in range(0, len(all_data), batch_size):
+                with self.SessionLocal() as session:
+                    connection = session.connection()
+                    connection.execute(query, all_data[i:i + batch_size])
+                    session.commit()
+                    updated_count += len(all_data[i:i + batch_size])
+            return updated_count
 
     def mark_as_disappeared(self, vendor: str, articles: List[str]) -> int:
         """Пометить позиции как исчезнувшие (батчами по 500 с промежуточным commit)"""
@@ -496,61 +551,81 @@ class SqlRepository(IRepository):
             else:
                 to_insert.append(item)
 
-        # Шаг 4: UPDATE ArticlePC для существующих (батчами по 1000, не трогаем Price/LaborCategory)
+        # Шаг 4: UPDATE ArticlePC для существующих (не трогаем Price/LaborCategory)
+        # MSSQL: временная таблица + один JOIN UPDATE; SQLite: executemany батчами
         if to_update_pc:
             start_time = time.time()
-            update_query = text("""
-                UPDATE Total_Price
-                SET ArticlePC = :article_pc,
-                    updated_at = :updated_at
-                WHERE Vendor = :vendor AND Part_Num = :part_num
-                AND (ArticlePC IS NULL OR ArticlePC = '')
-            """)
-            batch_size = 1000
-            updated_total = 0
-            num_batches = (len(to_update_pc) + batch_size - 1) // batch_size
+            update_data = [
+                {
+                    'article_pc': item['article_pc'],
+                    'vendor': item['vendor'],
+                    'part_num': item['part_num'],
+                    'updated_at': current_time
+                }
+                for item in to_update_pc
+            ]
 
-            # Используем ОДНУ сессию для всех UPDATE батчей
-            with self.SessionLocal() as session:
-                try:
-                    for batch_idx in range(0, len(to_update_pc), batch_size):
-                        batch = to_update_pc[batch_idx:batch_idx + batch_size]
-                        batch_num = batch_idx // batch_size + 1
-                        update_data = [
-                            {
-                                'article_pc': item['article_pc'],
-                                'vendor': item['vendor'],
-                                'part_num': item['part_num'],
-                                'updated_at': current_time
-                            }
-                            for item in batch
-                        ]
-                        # Получаем connection на каждую итерацию — после commit() он возвращается в пул
+            if not self.is_sqlite:
+                # MSSQL: временная таблица + один JOIN UPDATE
+                with self.SessionLocal() as session:
+                    try:
                         connection = session.connection()
-                        connection.execute(update_query, update_data)
-                        session.commit()
-                        updated_total += len(batch)
-
-                        # Пауза между батчами чтобы не блокировать БД
-                        if batch_num < num_batches:
-                            time.sleep(0.05)
-
-                        # Прогресс-лог каждые 10000 записей или для последнего батча
-                        if updated_total % 10000 < batch_size or batch_num == num_batches:
-                            elapsed = time.time() - start_time
-                            logger.info(
-                                f"[FIX] add_erp_items UPDATE: {updated_total}/{len(to_update_pc)} обработано, "
-                                f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
+                        connection.execute(text("""
+                            CREATE TABLE #tmp_erp_upd (
+                                Vendor NVARCHAR(255),
+                                Part_Num NVARCHAR(255),
+                                ArticlePC NVARCHAR(255),
+                                updated_at DATETIME
                             )
-
-                except Exception as e:
-                    logger.error(f"[FIX] Ошибка в add_erp_items UPDATE на батче {batch_num}/{num_batches}: {e}", exc_info=True)
-                    session.rollback()
-                    raise
+                        """))
+                        batch_size = 1000
+                        for i in range(0, len(update_data), batch_size):
+                            connection.execute(text("""
+                                INSERT INTO #tmp_erp_upd (Vendor, Part_Num, ArticlePC, updated_at)
+                                VALUES (:vendor, :part_num, :article_pc, :updated_at)
+                            """), update_data[i:i + batch_size])
+                        result = connection.execute(text("""
+                            UPDATE tp
+                            SET tp.ArticlePC = t.ArticlePC,
+                                tp.updated_at = t.updated_at
+                            FROM Total_Price tp
+                            INNER JOIN #tmp_erp_upd t
+                                ON tp.Vendor = t.Vendor AND tp.Part_Num = t.Part_Num
+                            WHERE tp.ArticlePC IS NULL OR tp.ArticlePC = ''
+                        """))
+                        updated_total = result.rowcount
+                        connection.execute(text("DROP TABLE #tmp_erp_upd"))
+                        session.commit()
+                    except Exception as e:
+                        logger.error(f"[FIX] Ошибка в add_erp_items UPDATE: {e}", exc_info=True)
+                        session.rollback()
+                        raise
+            else:
+                # SQLite: executemany батчами
+                update_query = text("""
+                    UPDATE Total_Price
+                    SET ArticlePC = :article_pc,
+                        updated_at = :updated_at
+                    WHERE Vendor = :vendor AND Part_Num = :part_num
+                    AND (ArticlePC IS NULL OR ArticlePC = '')
+                """)
+                updated_total = 0
+                with self.SessionLocal() as session:
+                    try:
+                        for i in range(0, len(update_data), 1000):
+                            connection = session.connection()
+                            connection.execute(update_query, update_data[i:i + 1000])
+                            session.commit()
+                            updated_total += len(update_data[i:i + 1000])
+                    except Exception as e:
+                        logger.error(f"[FIX] Ошибка в add_erp_items UPDATE: {e}", exc_info=True)
+                        session.rollback()
+                        raise
 
             elapsed_total = time.time() - start_time
+            method = 'temp table' if not self.is_sqlite else 'executemany'
             logger.info(
-                f"[FIX] ERP: {len(to_update_pc)} записей уже существовали — обновлён только ArticlePC "
+                f"[FIX] ERP ({method}): {updated_total}/{len(to_update_pc)} ArticlePC обновлено "
                 f"за {elapsed_total:.1f}с ({len(to_update_pc) / elapsed_total:.0f} rec/s)"
             )
 
@@ -619,7 +694,9 @@ class SqlRepository(IRepository):
     def bulk_set_article_pc(self, items: list) -> int:
         """
         Batch UPDATE ArticlePC для записей найденных по Vendor+Part_Num.
-        Обрабатывает батчами по 1000 с промежуточным commit и паузами для снижения блокировок.
+
+        MSSQL: временная таблица + один JOIN UPDATE (вместо N построчных UPDATE).
+        SQLite: executemany батчами по 1000.
 
         Каждый элемент items — dict с ключами: vendor, part_num, article_pc
         """
@@ -627,13 +704,6 @@ class SqlRepository(IRepository):
             return 0
 
         start_time = time.time()
-        query = text("""
-            UPDATE Total_Price
-            SET ArticlePC = :article_pc,
-                updated_at = :updated_at
-            WHERE Vendor = :vendor AND Part_Num = :part_num
-        """)
-
         current_time = datetime.now()
         all_data = [
             {
@@ -645,47 +715,69 @@ class SqlRepository(IRepository):
             for item in items
         ]
 
-        batch_size = 1000
-        total = 0
-        num_batches = (len(all_data) + batch_size - 1) // batch_size
-
-        # Используем ОДНУ сессию для всех батчей
-        with self.SessionLocal() as session:
-            try:
-                for batch_idx in range(0, len(all_data), batch_size):
-                    batch = all_data[batch_idx:batch_idx + batch_size]
-                    batch_num = batch_idx // batch_size + 1
-
-                    # Получаем connection на каждую итерацию — после commit() он возвращается в пул
+        if not self.is_sqlite:
+            # MSSQL: временная таблица + один JOIN UPDATE
+            with self.SessionLocal() as session:
+                try:
                     connection = session.connection()
-                    # executemany для эффективного выполнения множественных UPDATE
-                    connection.execute(query, batch)
-                    session.commit()
-                    total += len(batch)
-
-                    # Пауза между батчами чтобы не блокировать БД (позволяет другим транзакциям выполниться)
-                    if batch_num < num_batches:
-                        time.sleep(0.05)
-
-                    # Прогресс-лог каждые 10000 записей или для последнего батча
-                    if total % 10000 < batch_size or batch_num == num_batches:
-                        elapsed = time.time() - start_time
-                        logger.info(
-                            f"[FIX] bulk_set_article_pc: {total}/{len(all_data)} обработано, "
-                            f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
+                    connection.execute(text("""
+                        CREATE TABLE #tmp_apc (
+                            Vendor NVARCHAR(255),
+                            Part_Num NVARCHAR(255),
+                            ArticlePC NVARCHAR(255),
+                            updated_at DATETIME
                         )
+                    """))
+                    batch_size = 1000
+                    for i in range(0, len(all_data), batch_size):
+                        connection.execute(text("""
+                            INSERT INTO #tmp_apc (Vendor, Part_Num, ArticlePC, updated_at)
+                            VALUES (:vendor, :part_num, :article_pc, :updated_at)
+                        """), all_data[i:i + batch_size])
+                    result = connection.execute(text("""
+                        UPDATE tp
+                        SET tp.ArticlePC = t.ArticlePC,
+                            tp.updated_at = t.updated_at
+                        FROM Total_Price tp
+                        INNER JOIN #tmp_apc t
+                            ON tp.Vendor = t.Vendor AND tp.Part_Num = t.Part_Num
+                    """))
+                    affected = result.rowcount
+                    connection.execute(text("DROP TABLE #tmp_apc"))
+                    session.commit()
+                except Exception as e:
+                    logger.error(f"[FIX] Ошибка bulk_set_article_pc: {e}", exc_info=True)
+                    session.rollback()
+                    raise
+        else:
+            # SQLite: executemany батчами
+            query = text("""
+                UPDATE Total_Price
+                SET ArticlePC = :article_pc,
+                    updated_at = :updated_at
+                WHERE Vendor = :vendor AND Part_Num = :part_num
+            """)
+            affected = 0
+            batch_size = 1000
+            with self.SessionLocal() as session:
+                try:
+                    for i in range(0, len(all_data), batch_size):
+                        connection = session.connection()
+                        connection.execute(query, all_data[i:i + batch_size])
+                        session.commit()
+                        affected += len(all_data[i:i + batch_size])
+                except Exception as e:
+                    logger.error(f"[FIX] Ошибка bulk_set_article_pc: {e}", exc_info=True)
+                    session.rollback()
+                    raise
 
-            except Exception as e:
-                logger.error(f"[FIX] Ошибка в bulk_set_article_pc на батче {batch_num}/{num_batches}: {e}", exc_info=True)
-                session.rollback()
-                raise
-
-        elapsed_total = time.time() - start_time
+        elapsed = time.time() - start_time
+        method = 'temp table' if not self.is_sqlite else 'executemany'
         logger.info(
-            f"[FIX] bulk_set_article_pc завершён: {total} записей за {elapsed_total:.1f}с "
-            f"({total / elapsed_total:.0f} rec/s)"
+            f"[FIX] bulk_set_article_pc ({method}): {affected}/{len(all_data)} обновлено "
+            f"за {elapsed:.1f}с ({affected / elapsed:.0f} rec/s)"
         )
-        return total
+        return affected
 
     def get_all_article_pcs(self) -> set:
         """
