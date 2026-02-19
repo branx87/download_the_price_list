@@ -512,35 +512,41 @@ class SqlRepository(IRepository):
 
             # Используем ОДНУ сессию для всех UPDATE батчей
             with self.SessionLocal() as session:
-                connection = session.connection()
+                try:
+                    connection = session.connection()
 
-                for batch_idx in range(0, len(to_update_pc), batch_size):
-                    batch = to_update_pc[batch_idx:batch_idx + batch_size]
-                    batch_num = batch_idx // batch_size + 1
-                    update_data = [
-                        {
-                            'article_pc': item['article_pc'],
-                            'vendor': item['vendor'],
-                            'part_num': item['part_num'],
-                            'updated_at': current_time
-                        }
-                        for item in batch
-                    ]
-                    connection.execute(update_query, update_data)
-                    session.commit()
-                    updated_total += len(batch)
+                    for batch_idx in range(0, len(to_update_pc), batch_size):
+                        batch = to_update_pc[batch_idx:batch_idx + batch_size]
+                        batch_num = batch_idx // batch_size + 1
+                        update_data = [
+                            {
+                                'article_pc': item['article_pc'],
+                                'vendor': item['vendor'],
+                                'part_num': item['part_num'],
+                                'updated_at': current_time
+                            }
+                            for item in batch
+                        ]
+                        connection.execute(update_query, update_data)
+                        session.commit()
+                        updated_total += len(batch)
 
-                    # Пауза между батчами чтобы не блокировать БД
-                    if batch_num < num_batches:
-                        time.sleep(0.05)
+                        # Пауза между батчами чтобы не блокировать БД
+                        if batch_num < num_batches:
+                            time.sleep(0.05)
 
-                    # Прогресс-лог каждые 10000 записей или для последнего батча
-                    if updated_total % 10000 < batch_size or batch_num == num_batches:
-                        elapsed = time.time() - start_time
-                        logger.info(
-                            f"[FIX] add_erp_items UPDATE: {updated_total}/{len(to_update_pc)} обработано, "
-                            f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
-                        )
+                        # Прогресс-лог каждые 10000 записей или для последнего батча
+                        if updated_total % 10000 < batch_size or batch_num == num_batches:
+                            elapsed = time.time() - start_time
+                            logger.info(
+                                f"[FIX] add_erp_items UPDATE: {updated_total}/{len(to_update_pc)} обработано, "
+                                f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
+                            )
+
+                except Exception as e:
+                    logger.error(f"[FIX] Ошибка в add_erp_items UPDATE на батче {batch_num}/{num_batches}: {e}", exc_info=True)
+                    session.rollback()
+                    raise
 
             elapsed_total = time.time() - start_time
             logger.info(
@@ -562,39 +568,45 @@ class SqlRepository(IRepository):
 
             # Используем ОДНУ сессию для всех INSERT батчей
             with self.SessionLocal() as session:
-                connection = session.connection()
+                try:
+                    connection = session.connection()
 
-                for batch_idx in range(0, len(to_insert), batch_size):
-                    batch = to_insert[batch_idx:batch_idx + batch_size]
-                    batch_num = batch_idx // batch_size + 1
-                    insert_data = [
-                        {
-                            'vendor': item['vendor'],
-                            'part_num': item['part_num'],
-                            'descr': item['descr'],
-                            'units': item['units'],
-                            'price_text': 'Цена по запросу',
-                            'article_pc': item['article_pc'],
-                            'vendor_for_filter': item['vendor_for_filter'],
-                            'updated_at': current_time
-                        }
-                        for item in batch
-                    ]
-                    connection.execute(insert_query, insert_data)
-                    session.commit()
-                    inserted += len(batch)
+                    for batch_idx in range(0, len(to_insert), batch_size):
+                        batch = to_insert[batch_idx:batch_idx + batch_size]
+                        batch_num = batch_idx // batch_size + 1
+                        insert_data = [
+                            {
+                                'vendor': item['vendor'],
+                                'part_num': item['part_num'],
+                                'descr': item['descr'],
+                                'units': item['units'],
+                                'price_text': 'Цена по запросу',
+                                'article_pc': item['article_pc'],
+                                'vendor_for_filter': item['vendor_for_filter'],
+                                'updated_at': current_time
+                            }
+                            for item in batch
+                        ]
+                        connection.execute(insert_query, insert_data)
+                        session.commit()
+                        inserted += len(batch)
 
-                    # Пауза между батчами чтобы не блокировать БД
-                    if batch_num < num_batches:
-                        time.sleep(0.05)
+                        # Пауза между батчами чтобы не блокировать БД
+                        if batch_num < num_batches:
+                            time.sleep(0.05)
 
-                    # Прогресс-лог каждые 10000 записей или для последнего батча
-                    if inserted % 10000 < batch_size or batch_num == num_batches:
-                        elapsed = time.time() - start_time
-                        logger.info(
-                            f"[FIX] add_erp_items INSERT: {inserted}/{len(to_insert)} обработано, "
-                            f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
-                        )
+                        # Прогресс-лог каждые 10000 записей или для последнего батча
+                        if inserted % 10000 < batch_size or batch_num == num_batches:
+                            elapsed = time.time() - start_time
+                            logger.info(
+                                f"[FIX] add_erp_items INSERT: {inserted}/{len(to_insert)} обработано, "
+                                f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
+                            )
+
+                except Exception as e:
+                    logger.error(f"[FIX] Ошибка в add_erp_items INSERT на батче {batch_num}/{num_batches}: {e}", exc_info=True)
+                    session.rollback()
+                    raise
 
             elapsed_total = time.time() - start_time
             logger.info(
@@ -639,28 +651,34 @@ class SqlRepository(IRepository):
 
         # Используем ОДНУ сессию для всех батчей
         with self.SessionLocal() as session:
-            connection = session.connection()
+            try:
+                connection = session.connection()
 
-            for batch_idx in range(0, len(all_data), batch_size):
-                batch = all_data[batch_idx:batch_idx + batch_size]
-                batch_num = batch_idx // batch_size + 1
+                for batch_idx in range(0, len(all_data), batch_size):
+                    batch = all_data[batch_idx:batch_idx + batch_size]
+                    batch_num = batch_idx // batch_size + 1
 
-                # executemany для эффективного выполнения множественных UPDATE
-                connection.execute(query, batch)
-                session.commit()
-                total += len(batch)
+                    # executemany для эффективного выполнения множественных UPDATE
+                    connection.execute(query, batch)
+                    session.commit()
+                    total += len(batch)
 
-                # Пауза между батчами чтобы не блокировать БД (позволяет другим транзакциям выполниться)
-                if batch_num < num_batches:
-                    time.sleep(0.05)
+                    # Пауза между батчами чтобы не блокировать БД (позволяет другим транзакциям выполниться)
+                    if batch_num < num_batches:
+                        time.sleep(0.05)
 
-                # Прогресс-лог каждые 10000 записей или для последнего батча
-                if total % 10000 < batch_size or batch_num == num_batches:
-                    elapsed = time.time() - start_time
-                    logger.info(
-                        f"[FIX] bulk_set_article_pc: {total}/{len(all_data)} обработано, "
-                        f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
-                    )
+                    # Прогресс-лог каждые 10000 записей или для последнего батча
+                    if total % 10000 < batch_size or batch_num == num_batches:
+                        elapsed = time.time() - start_time
+                        logger.info(
+                            f"[FIX] bulk_set_article_pc: {total}/{len(all_data)} обработано, "
+                            f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
+                        )
+
+            except Exception as e:
+                logger.error(f"[FIX] Ошибка в bulk_set_article_pc на батче {batch_num}/{num_batches}: {e}", exc_info=True)
+                session.rollback()
+                raise
 
         elapsed_total = time.time() - start_time
         logger.info(
@@ -670,24 +688,40 @@ class SqlRepository(IRepository):
         return total
 
     def get_all_article_pcs(self) -> set:
-        """Получить все существующие ArticlePC из БД (с нормализацией пробелов)"""
+        """
+        Получить все существующие ArticlePC из БД с нормализацией.
+
+        Применяем .strip() и .upper() для консистентности с ERP sync.
+        """
         with self.SessionLocal() as session:
             query = text(f"""
                 SELECT ArticlePC FROM Total_Price {self._nolock}
                 WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
             """)
             result = session.execute(query)
-            return {row[0].strip() for row in result if row[0]}
+            return {row[0].strip().upper() for row in result if row[0]}
 
     def get_all_vendor_part_num_pairs(self) -> set:
-        """Получить все существующие пары Vendor+Part_Num (с нормализацией пробелов)"""
+        """
+        Получить все существующие пары Vendor+Part_Num с ПОЛНОЙ нормализацией.
+
+        КРИТИЧНО: Применяем ту же нормализацию что и в ERP sync (DataNormalizer),
+        иначе возникают дубли из-за несовпадения регистра/пробелов.
+        """
         with self.SessionLocal() as session:
             query = text(f"""
                 SELECT Vendor, Part_Num FROM Total_Price {self._nolock}
                 WHERE Part_Num IS NOT NULL AND Part_Num != ''
             """)
             result = session.execute(query)
-            return {(row[0].strip() if row[0] else '', row[1].strip() if row[1] else '') for row in result}
+            # Применяем нормализацию ТОЧНО как в erp_sync_service.py
+            return {
+                (
+                    DataNormalizer.normalize_vendor_name(row[0]) if row[0] else '',
+                    DataNormalizer.normalize_article(row[1]) if row[1] else ''
+                )
+                for row in result
+            }
 
     def reset_changed_status(self, vendor: str) -> int:
         """Сбросить статус price_changed/new/NULL на active после синхронизации"""
