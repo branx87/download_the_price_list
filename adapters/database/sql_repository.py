@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import List, Set, Optional
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -84,8 +85,9 @@ class SqlRepository(IRepository):
     def cleanup_none_strings(self):
         """Заменяет строки 'None' на пустые строки во всех текстовых полях.
         Каждая колонка — отдельная транзакция, чтобы не блокировать таблицу надолго."""
+        # Discount исключён - это числовое поле, не может содержать 'None'
         columns = ['Storage', 'Currency', 'URL', 'Labor', 'LaborCategory',
-                   'ArticlePC', 'Discount', 'PriceText', 'Alt_Part_Num']
+                   'ArticlePC', 'PriceText', 'Alt_Part_Num']
         total_fixed = 0
         for col in columns:
             try:
@@ -494,8 +496,9 @@ class SqlRepository(IRepository):
             else:
                 to_insert.append(item)
 
-        # Шаг 4: UPDATE ArticlePC для существующих (батчами по 200, не трогаем Price/LaborCategory)
+        # Шаг 4: UPDATE ArticlePC для существующих (батчами по 1000, не трогаем Price/LaborCategory)
         if to_update_pc:
+            start_time = time.time()
             update_query = text("""
                 UPDATE Total_Price
                 SET ArticlePC = :article_pc,
@@ -503,66 +506,115 @@ class SqlRepository(IRepository):
                 WHERE Vendor = :vendor AND Part_Num = :part_num
                 AND (ArticlePC IS NULL OR ArticlePC = '')
             """)
-            batch_size = 200
-            for i in range(0, len(to_update_pc), batch_size):
-                batch = to_update_pc[i:i + batch_size]
-                update_data = [
-                    {
-                        'article_pc': item['article_pc'],
-                        'vendor': item['vendor'],
-                        'part_num': item['part_num'],
-                        'updated_at': current_time
-                    }
-                    for item in batch
-                ]
-                with self.SessionLocal() as session:
-                    connection = session.connection()
+            batch_size = 1000
+            updated_total = 0
+            num_batches = (len(to_update_pc) + batch_size - 1) // batch_size
+
+            # Используем ОДНУ сессию для всех UPDATE батчей
+            with self.SessionLocal() as session:
+                connection = session.connection()
+
+                for batch_idx in range(0, len(to_update_pc), batch_size):
+                    batch = to_update_pc[batch_idx:batch_idx + batch_size]
+                    batch_num = batch_idx // batch_size + 1
+                    update_data = [
+                        {
+                            'article_pc': item['article_pc'],
+                            'vendor': item['vendor'],
+                            'part_num': item['part_num'],
+                            'updated_at': current_time
+                        }
+                        for item in batch
+                    ]
                     connection.execute(update_query, update_data)
                     session.commit()
-            logger.info(f"[FIX] ERP: {len(to_update_pc)} записей уже существовали — обновлён только ArticlePC")
+                    updated_total += len(batch)
 
-        # Шаг 5: INSERT только реально новых записей (батчами по 200)
+                    # Пауза между батчами чтобы не блокировать БД
+                    if batch_num < num_batches:
+                        time.sleep(0.05)
+
+                    # Прогресс-лог каждые 10000 записей или для последнего батча
+                    if updated_total % 10000 < batch_size or batch_num == num_batches:
+                        elapsed = time.time() - start_time
+                        logger.info(
+                            f"[FIX] add_erp_items UPDATE: {updated_total}/{len(to_update_pc)} обработано, "
+                            f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
+                        )
+
+            elapsed_total = time.time() - start_time
+            logger.info(
+                f"[FIX] ERP: {len(to_update_pc)} записей уже существовали — обновлён только ArticlePC "
+                f"за {elapsed_total:.1f}с ({len(to_update_pc) / elapsed_total:.0f} rec/s)"
+            )
+
+        # Шаг 5: INSERT только реально новых записей (батчами по 1000)
         inserted = 0
         if to_insert:
+            start_time = time.time()
             insert_query = text("""
                 INSERT INTO Total_Price
                 (Vendor, Part_Num, Descr, Price, Units, PriceText, ArticlePC, VendorForFilter, Status, updated_at)
                 VALUES (:vendor, :part_num, :descr, 0, :units, :price_text, :article_pc, :vendor_for_filter, 'active', :updated_at)
             """)
-            batch_size = 200
-            for i in range(0, len(to_insert), batch_size):
-                batch = to_insert[i:i + batch_size]
-                insert_data = [
-                    {
-                        'vendor': item['vendor'],
-                        'part_num': item['part_num'],
-                        'descr': item['descr'],
-                        'units': item['units'],
-                        'price_text': 'Цена по запросу',
-                        'article_pc': item['article_pc'],
-                        'vendor_for_filter': item['vendor_for_filter'],
-                        'updated_at': current_time
-                    }
-                    for item in batch
-                ]
-                with self.SessionLocal() as session:
-                    connection = session.connection()
+            batch_size = 1000
+            num_batches = (len(to_insert) + batch_size - 1) // batch_size
+
+            # Используем ОДНУ сессию для всех INSERT батчей
+            with self.SessionLocal() as session:
+                connection = session.connection()
+
+                for batch_idx in range(0, len(to_insert), batch_size):
+                    batch = to_insert[batch_idx:batch_idx + batch_size]
+                    batch_num = batch_idx // batch_size + 1
+                    insert_data = [
+                        {
+                            'vendor': item['vendor'],
+                            'part_num': item['part_num'],
+                            'descr': item['descr'],
+                            'units': item['units'],
+                            'price_text': 'Цена по запросу',
+                            'article_pc': item['article_pc'],
+                            'vendor_for_filter': item['vendor_for_filter'],
+                            'updated_at': current_time
+                        }
+                        for item in batch
+                    ]
                     connection.execute(insert_query, insert_data)
                     session.commit()
                     inserted += len(batch)
+
+                    # Пауза между батчами чтобы не блокировать БД
+                    if batch_num < num_batches:
+                        time.sleep(0.05)
+
+                    # Прогресс-лог каждые 10000 записей или для последнего батча
+                    if inserted % 10000 < batch_size or batch_num == num_batches:
+                        elapsed = time.time() - start_time
+                        logger.info(
+                            f"[FIX] add_erp_items INSERT: {inserted}/{len(to_insert)} обработано, "
+                            f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
+                        )
+
+            elapsed_total = time.time() - start_time
+            logger.info(
+                f"[FIX] ERP: {inserted} новых записей добавлено за {elapsed_total:.1f}с "
+                f"({inserted / elapsed_total:.0f} rec/s)"
+            )
 
         return inserted
 
     def bulk_set_article_pc(self, items: list) -> int:
         """
         Batch UPDATE ArticlePC для записей найденных по Vendor+Part_Num.
-        Обрабатывает батчами по 200 с промежуточным commit для снижения блокировок.
+        Обрабатывает батчами по 1000 с промежуточным commit и паузами для снижения блокировок.
 
         Каждый элемент items — dict с ключами: vendor, part_num, article_pc
         """
         if not items:
             return 0
 
+        start_time = time.time()
         query = text("""
             UPDATE Total_Price
             SET ArticlePC = :article_pc,
@@ -581,16 +633,40 @@ class SqlRepository(IRepository):
             for item in items
         ]
 
-        batch_size = 200
+        batch_size = 1000
         total = 0
-        for i in range(0, len(all_data), batch_size):
-            batch = all_data[i:i + batch_size]
-            with self.SessionLocal() as session:
-                connection = session.connection()
+        num_batches = (len(all_data) + batch_size - 1) // batch_size
+
+        # Используем ОДНУ сессию для всех батчей
+        with self.SessionLocal() as session:
+            connection = session.connection()
+
+            for batch_idx in range(0, len(all_data), batch_size):
+                batch = all_data[batch_idx:batch_idx + batch_size]
+                batch_num = batch_idx // batch_size + 1
+
+                # executemany для эффективного выполнения множественных UPDATE
                 connection.execute(query, batch)
                 session.commit()
                 total += len(batch)
 
+                # Пауза между батчами чтобы не блокировать БД (позволяет другим транзакциям выполниться)
+                if batch_num < num_batches:
+                    time.sleep(0.05)
+
+                # Прогресс-лог каждые 10000 записей или для последнего батча
+                if total % 10000 < batch_size or batch_num == num_batches:
+                    elapsed = time.time() - start_time
+                    logger.info(
+                        f"[FIX] bulk_set_article_pc: {total}/{len(all_data)} обработано, "
+                        f"батч {batch_num}/{num_batches}, время: {elapsed:.1f}с"
+                    )
+
+        elapsed_total = time.time() - start_time
+        logger.info(
+            f"[FIX] bulk_set_article_pc завершён: {total} записей за {elapsed_total:.1f}с "
+            f"({total / elapsed_total:.0f} rec/s)"
+        )
         return total
 
     def get_all_article_pcs(self) -> set:
