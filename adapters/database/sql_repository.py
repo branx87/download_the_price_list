@@ -132,6 +132,26 @@ class SqlRepository(IRepository):
                         total_fixed += result.rowcount
             except Exception as e:
                 logger.error(f"Ошибка обрезки пробелов в {col}: {e}")
+        # Дополнительно: убираем ВНУТРЕННИЕ пробелы из Part_Num.
+        # normalize_article() делает re.sub(r'\s+', '', article), но cleanup_whitespace
+        # ранее убирал только LEADING/TRAILING. Из-за этого несоответствия
+        # bulk_set_article_pc не мог найти запись в БД по нормализованному Part_Num
+        # и ArticlePC никогда не сохранялся → одни и те же позиции "привязывались" снова и снова.
+        try:
+            with self.SessionLocal() as session:
+                result = session.execute(text(
+                    "UPDATE Total_Price "
+                    "SET Part_Num = REPLACE(Part_Num, ' ', '') "
+                    "WHERE Part_Num IS NOT NULL AND Part_Num != '' "
+                    "AND Part_Num != REPLACE(Part_Num, ' ', '')"
+                ))
+                session.commit()
+                if result.rowcount > 0:
+                    logger.info(f"[FIX] Убраны внутренние пробелы из Part_Num: {result.rowcount} записей")
+                    total_fixed += result.rowcount
+        except Exception as e:
+            logger.error(f"[FIX] Ошибка нормализации внутренних пробелов Part_Num: {e}")
+
         if total_fixed > 0:
             logger.info(f"[FIX] Итого обрезано пробелов: {total_fixed} записей")
         else:
@@ -777,6 +797,11 @@ class SqlRepository(IRepository):
             f"[FIX] bulk_set_article_pc ({method}): {affected}/{len(all_data)} обновлено "
             f"за {elapsed:.1f}с ({affected / elapsed:.0f} rec/s)"
         )
+        if affected == 0 and len(all_data) > 0:
+            logger.warning(
+                f"[FIX] bulk_set_article_pc: 0 строк обновлено при {len(all_data)} входных записях — "
+                f"несоответствие Vendor/Part_Num между кодом и БД"
+            )
         return affected
 
     def get_all_article_pcs(self) -> set:
