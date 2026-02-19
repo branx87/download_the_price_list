@@ -130,13 +130,12 @@ class ErpSyncService:
                     existing_article_pcs.add(code)
                     existing_pairs.add((manufacturer, article))
                     result.added += 1
-                    if len(result.added_details) < 1000:
-                        result.added_details.append({
-                            'vendor': manufacturer,
-                            'part_num': article,
-                            'article_pc': code,
-                            'name': name
-                        })
+                    result.added_details.append({
+                        'vendor': manufacturer,
+                        'part_num': article,
+                        'article_pc': code,
+                        'name': name
+                    })
                     logger.debug(f"[ERP] Новая позиция: {manufacturer} | {article} | {name} | код {code}")
 
                 except Exception as e:

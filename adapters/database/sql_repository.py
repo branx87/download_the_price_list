@@ -513,8 +513,6 @@ class SqlRepository(IRepository):
             # Используем ОДНУ сессию для всех UPDATE батчей
             with self.SessionLocal() as session:
                 try:
-                    connection = session.connection()
-
                     for batch_idx in range(0, len(to_update_pc), batch_size):
                         batch = to_update_pc[batch_idx:batch_idx + batch_size]
                         batch_num = batch_idx // batch_size + 1
@@ -527,6 +525,8 @@ class SqlRepository(IRepository):
                             }
                             for item in batch
                         ]
+                        # Получаем connection на каждую итерацию — после commit() он возвращается в пул
+                        connection = session.connection()
                         connection.execute(update_query, update_data)
                         session.commit()
                         updated_total += len(batch)
@@ -569,8 +569,6 @@ class SqlRepository(IRepository):
             # Используем ОДНУ сессию для всех INSERT батчей
             with self.SessionLocal() as session:
                 try:
-                    connection = session.connection()
-
                     for batch_idx in range(0, len(to_insert), batch_size):
                         batch = to_insert[batch_idx:batch_idx + batch_size]
                         batch_num = batch_idx // batch_size + 1
@@ -587,6 +585,8 @@ class SqlRepository(IRepository):
                             }
                             for item in batch
                         ]
+                        # Получаем connection на каждую итерацию — после commit() он возвращается в пул
+                        connection = session.connection()
                         connection.execute(insert_query, insert_data)
                         session.commit()
                         inserted += len(batch)
@@ -652,12 +652,12 @@ class SqlRepository(IRepository):
         # Используем ОДНУ сессию для всех батчей
         with self.SessionLocal() as session:
             try:
-                connection = session.connection()
-
                 for batch_idx in range(0, len(all_data), batch_size):
                     batch = all_data[batch_idx:batch_idx + batch_size]
                     batch_num = batch_idx // batch_size + 1
 
+                    # Получаем connection на каждую итерацию — после commit() он возвращается в пул
+                    connection = session.connection()
                     # executemany для эффективного выполнения множественных UPDATE
                     connection.execute(query, batch)
                     session.commit()
