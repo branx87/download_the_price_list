@@ -1,10 +1,13 @@
 """Сервис для создания отчётов об изменениях"""
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
+import logging
 import pandas as pd
 from typing import List
 from domain.entities.sync_result import SyncResult
 from domain.entities.erp_sync_result import ErpSyncResult
+
+logger = logging.getLogger(__name__)
 
 
 class ReportService:
@@ -14,9 +17,25 @@ class ReportService:
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(exist_ok=True, parents=True)
 
+    def cleanup_old_reports(self, days: int = 7) -> int:
+        """Удаляет отчёты старше указанного количества дней. Возвращает число удалённых файлов."""
+        cutoff = datetime.now() - timedelta(days=days)
+        deleted = 0
+        for f in self.reports_dir.glob("report_*.xlsx"):
+            if datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
+                try:
+                    f.unlink()
+                    deleted += 1
+                except Exception as e:
+                    logger.warning(f"[REPORT] Не удалось удалить {f.name}: {e}")
+        if deleted:
+            logger.info(f"[REPORT] Удалено старых отчётов: {deleted}")
+        return deleted
+
     def create_report(self, vendor: str, result: SyncResult) -> Path:
         """
-        Создаёт Excel отчёт с 3 листами: новые/удалённые/изменённые позиции.
+        Создаёт Excel отчёт с листами: новые/удалённые/изменения цен/сводка.
+        Перед созданием удаляет отчёты старше 7 дней.
 
         Args:
             vendor: Название вендора
@@ -25,6 +44,8 @@ class ReportService:
         Returns:
             Path к созданному файлу
         """
+        self.cleanup_old_reports(days=7)
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M')
         filename = f"report_{vendor}_{timestamp}.xlsx"
         filepath = self.reports_dir / filename
@@ -38,9 +59,9 @@ class ReportService:
             if result.disappeared_items_list:
                 self._write_items_sheet(writer, result.disappeared_items_list, 'Удалённые')
 
-            # Лист 3: Изменённые цены
-            if result.updated_items:
-                self._write_items_sheet(writer, result.updated_items, 'Изменённые')
+            # Лист 3: Изменения цен (старая vs новая)
+            if result.price_changes_list:
+                self._write_price_changes_sheet(writer, result.price_changes_list)
 
             # Сводка
             self._write_summary_sheet(writer, result)
@@ -60,6 +81,21 @@ class ReportService:
         ]
         df = pd.DataFrame(data)
         df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    def _write_price_changes_sheet(self, writer, price_changes: List):
+        """Записывает лист с изменениями цен: артикул, наименование, старая цена, новая цена"""
+        data = [
+            {
+                'Артикул': change.article,
+                'Наименование': change.description,
+                'Старая цена': float(change.old_price),
+                'Новая цена': float(change.new_price),
+                'Изменение, %': f"{change.price_diff_percent:+.1f}%"
+            }
+            for change in price_changes
+        ]
+        df = pd.DataFrame(data)
+        df.to_excel(writer, sheet_name='Изменения цен', index=False)
 
     def _write_summary_sheet(self, writer, result: SyncResult):
         """Записывает сводку в отдельный лист"""

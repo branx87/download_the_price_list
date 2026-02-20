@@ -98,6 +98,7 @@ class SyncService:
 
             # Обновленные позиции (изменилась цена или описание, и новая цена > 0)
             to_update = []
+            price_changes = []
             for article in (new_articles_with_price & current_articles):
                 new_item = new_items_with_price_map[article]
                 old_item = current_items_map[article]
@@ -105,6 +106,13 @@ class SyncService:
                 desc_changed = (new_item.description or '') != (old_item.description or '')
                 if price_changed or desc_changed:
                     to_update.append(new_item)
+                    if price_changed:
+                        price_changes.append(PriceChange(
+                            article=article,
+                            description=new_item.description,
+                            old_price=old_item.price,
+                            new_price=new_item.price
+                        ))
 
             # 5. Загружаем маппинг синонимов для VendorForFilter
             synonyms_map = {}
@@ -122,7 +130,8 @@ class SyncService:
                 updated = self.repository.update_items(to_update, synonyms_map=synonyms_map)
                 result.updated_items = updated
                 result.updated_items_list = to_update
-                logger.info(f"🔄 Обновлено цен: {updated}")
+                result.price_changes_list = price_changes
+                logger.info(f"🔄 Обновлено цен: {updated} (из них изменений цен: {len(price_changes)})")
 
             if disappeared_articles:
                 marked = self.repository.mark_as_disappeared(vendor, disappeared_articles)

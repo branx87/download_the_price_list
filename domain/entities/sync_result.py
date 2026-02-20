@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
 from domain.entities.price_item import PriceItem
+from domain.entities.price_comparison import PriceChange
 
 
 @dataclass
@@ -27,6 +28,7 @@ class SyncResult:
     added_items: List[PriceItem] = field(default_factory=list)
     updated_items_list: List[PriceItem] = field(default_factory=list)
     disappeared_items_list: List[PriceItem] = field(default_factory=list)
+    price_changes_list: List[PriceChange] = field(default_factory=list)
 
     @property
     def execution_time(self) -> float:
