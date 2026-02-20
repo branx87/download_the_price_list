@@ -64,23 +64,29 @@ class ErpSyncService:
             logger.debug(f"В БД найдено {len(existing_pairs)} пар Vendor+Part_Num")
 
             # Строим lookup с учётом синонимов:
-            # {(vendor_или_canonical, part_num) -> set[actual_db_vendors]}
-            # Пример: БД имеет ('1SE', 'ART') и ('A-SE', 'ART'), синонимы: 1SE->SE, A-SE->SE
-            # pair_to_db_vendors[('SE', 'ART')] = {'1SE', 'A-SE'}  — обновим обоих
+            # ключ   = (norm_vendor, norm_part_num) — для поиска по нормализованным данным из 1C
+            # значение = set[(orig_vendor, orig_part_num)] — оригинальные значения из БД для UPDATE
+            #
+            # Важно: Part_Num хранится в БД как есть (с пробелами, напр. 'ШМТ осн 80х8').
+            # Нормализация используется ТОЛЬКО для сравнения/поиска, но не меняет значения в БД.
             pair_to_db_vendors: dict = {}
             synonyms_resolved = 0
-            for vendor, part_num in existing_pairs:
+            for vendor_raw, part_num_raw in existing_pairs:
+                vendor_norm = DataNormalizer.normalize_vendor_name(vendor_raw)
+                part_num_norm = DataNormalizer.normalize_article(part_num_raw)
                 # Прямой ключ
-                if (vendor, part_num) not in pair_to_db_vendors:
-                    pair_to_db_vendors[(vendor, part_num)] = set()
-                pair_to_db_vendors[(vendor, part_num)].add(vendor)
+                key = (vendor_norm, part_num_norm)
+                if key not in pair_to_db_vendors:
+                    pair_to_db_vendors[key] = set()
+                pair_to_db_vendors[key].add((vendor_raw, part_num_raw))
                 # Ключ по canonical имени синонима
-                if vendor in synonyms_map:
-                    canonical = synonyms_map[vendor]
-                    if (canonical, part_num) not in pair_to_db_vendors:
-                        pair_to_db_vendors[(canonical, part_num)] = set()
+                if vendor_norm in synonyms_map:
+                    canonical = synonyms_map[vendor_norm]
+                    canon_key = (canonical, part_num_norm)
+                    if canon_key not in pair_to_db_vendors:
+                        pair_to_db_vendors[canon_key] = set()
                         synonyms_resolved += 1
-                    pair_to_db_vendors[(canonical, part_num)].add(vendor)
+                    pair_to_db_vendors[canon_key].add((vendor_raw, part_num_raw))
             if synonyms_resolved:
                 logger.info(
                     f"[ERP] Lookup с синонимами: {len(pair_to_db_vendors)} ключей "
@@ -127,27 +133,35 @@ class ErpSyncService:
                     # Шаг 2: Найден по Vendor+Part_Num (с учётом синонимов) → привязываем ArticlePC
                     # Обновляем ВСЕ вендора с таким артикулом (SE + 1SE + A-SE)
                     if (manufacturer, article) in pair_to_db_vendors:
-                        db_vendors = pair_to_db_vendors[(manufacturer, article)]
-                        synonym_vendors = db_vendors - {manufacturer}
+                        db_pairs = pair_to_db_vendors[(manufacturer, article)]
+                        # db_pairs — set[(orig_vendor, orig_part_num)] из БД
+                        db_vendor_names = {v for v, _ in db_pairs}
+                        synonym_vendors = db_vendor_names - {manufacturer}
                         if synonym_vendors:
                             logger.debug(
                                 f"[ERP] Найдено через синонимы: '{manufacturer}' -> {sorted(synonym_vendors)} | {article}"
                             )
-                        for db_vendor in db_vendors:
+                        for orig_vendor, orig_part_num in db_pairs:
+                            # Используем оригинальный Part_Num из БД, чтобы JOIN в bulk_set_article_pc
+                            # нашёл запись — даже если Part_Num содержит внутренние пробелы ('ШМТ осн 80х8')
+                            logger.debug(
+                                f"[FIX] to_update: vendor={orig_vendor!r} part_num={orig_part_num!r} "
+                                f"(norm: {article!r}) article_pc={code!r}"
+                            )
                             to_update_article_pc.append({
-                                'vendor': db_vendor,
-                                'part_num': article,
+                                'vendor': orig_vendor,
+                                'part_num': orig_part_num,
                                 'article_pc': code
                             })
                         existing_article_pcs.add(code)
                         result.updated += 1
                         result.linked_details.append({
-                            'vendor': sorted(db_vendors)[0],
+                            'vendor': sorted(db_vendor_names)[0],
                             'part_num': article,
                             'article_pc': code,
                             'name': name
                         })
-                        logger.debug(f"[ERP] Привязка ArticlePC: {sorted(db_vendors)} | {article} -> код {code}")
+                        logger.debug(f"[ERP] Привязка ArticlePC: {sorted(db_vendor_names)} | {article} -> код {code}")
                         continue
 
                     # Шаг 3: Нигде не найден → INSERT

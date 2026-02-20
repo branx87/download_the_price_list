@@ -132,26 +132,6 @@ class SqlRepository(IRepository):
                         total_fixed += result.rowcount
             except Exception as e:
                 logger.error(f"Ошибка обрезки пробелов в {col}: {e}")
-        # Дополнительно: убираем ВНУТРЕННИЕ пробелы из Part_Num.
-        # normalize_article() делает re.sub(r'\s+', '', article), но cleanup_whitespace
-        # ранее убирал только LEADING/TRAILING. Из-за этого несоответствия
-        # bulk_set_article_pc не мог найти запись в БД по нормализованному Part_Num
-        # и ArticlePC никогда не сохранялся → одни и те же позиции "привязывались" снова и снова.
-        try:
-            with self.SessionLocal() as session:
-                result = session.execute(text(
-                    "UPDATE Total_Price "
-                    "SET Part_Num = REPLACE(Part_Num, ' ', '') "
-                    "WHERE Part_Num IS NOT NULL AND Part_Num != '' "
-                    "AND Part_Num != REPLACE(Part_Num, ' ', '')"
-                ))
-                session.commit()
-                if result.rowcount > 0:
-                    logger.info(f"[FIX] Убраны внутренние пробелы из Part_Num: {result.rowcount} записей")
-                    total_fixed += result.rowcount
-        except Exception as e:
-            logger.error(f"[FIX] Ошибка нормализации внутренних пробелов Part_Num: {e}")
-
         if total_fixed > 0:
             logger.info(f"[FIX] Итого обрезано пробелов: {total_fixed} записей")
         else:
@@ -818,12 +798,14 @@ class SqlRepository(IRepository):
             result = session.execute(query)
             return {row[0].strip().upper() for row in result if row[0]}
 
-    def get_all_vendor_part_num_pairs(self) -> set:
+    def get_all_vendor_part_num_pairs(self) -> list:
         """
-        Получить все существующие пары Vendor+Part_Num с ПОЛНОЙ нормализацией.
+        Получить все существующие пары Vendor+Part_Num из БД — БЕЗ нормализации.
 
-        КРИТИЧНО: Применяем ту же нормализацию что и в ERP sync (DataNormalizer),
-        иначе возникают дубли из-за несовпадения регистра/пробелов.
+        Возвращает оригинальные значения как они хранятся в БД.
+        Нормализация для lookup выполняется в erp_sync_service.py,
+        чтобы для UPDATE использовался оригинальный Part_Num (а не нормализованный).
+        Это позволяет сохранять артикулы с пробелами — например 'ШМТ осн 80х8'.
         """
         with self.SessionLocal() as session:
             query = text(f"""
@@ -831,14 +813,7 @@ class SqlRepository(IRepository):
                 WHERE Part_Num IS NOT NULL AND Part_Num != ''
             """)
             result = session.execute(query)
-            # Применяем нормализацию ТОЧНО как в erp_sync_service.py
-            return {
-                (
-                    DataNormalizer.normalize_vendor_name(row[0]) if row[0] else '',
-                    DataNormalizer.normalize_article(row[1]) if row[1] else ''
-                )
-                for row in result
-            }
+            return [(row[0] or '', row[1] or '') for row in result]
 
     def reset_changed_status(self, vendor: str) -> int:
         """Сбросить статус price_changed/new/NULL на active после синхронизации"""
