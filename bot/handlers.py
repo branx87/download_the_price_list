@@ -181,15 +181,21 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def parse_sync_output(output: str, vendor: str):
-    """Парсит вывод main.py и извлекает статистику"""
-    total = new = updated = disappeared = 0
+    """Парсит вывод main.py и извлекает статистику.
+
+    Returns: (total, new, updated, price_changes, disappeared)
+    """
+    total = new = updated = price_changes = disappeared = 0
 
     if not output:
         logger.warning(f"{vendor}: output is empty")
-        return 0, 0, 0, 0
+        return 0, 0, 0, 0, 0
 
-    # Ищем строку типа: "KEAZ: total=31986, new=0, updated=5, disappeared=0, time=5.0s"
-    pattern = rf"{vendor}:\s*total=(\d+),\s*new=(\d+),\s*updated=(\d+),\s*disappeared=(\d+)"
+    # Ищем строку: "KEAZ: total=31986, new=0, updated=5, price_changes=3, disappeared=0, time=5.0s"
+    pattern = (
+        rf"{vendor}:\s*total=(\d+),\s*new=(\d+),\s*updated=(\d+),\s*"
+        rf"price_changes=(\d+),\s*disappeared=(\d+)"
+    )
 
     for line in output.split('\n'):
         match = re.search(pattern, line, re.IGNORECASE)
@@ -197,10 +203,11 @@ def parse_sync_output(output: str, vendor: str):
             total = int(match.group(1))
             new = int(match.group(2))
             updated = int(match.group(3))
-            disappeared = int(match.group(4))
+            price_changes = int(match.group(4))
+            disappeared = int(match.group(5))
             break
 
-    return total, new, updated, disappeared
+    return total, new, updated, price_changes, disappeared
 
 
 async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -250,13 +257,14 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 #     logger.info(f"DKC stdout: {result.stdout}")
                 #     logger.error(f"DKC stderr: {result.stderr}")
                 
-                total, new, updated, disappeared = parse_sync_output(output, vendor)
+                total, new, updated, price_changes, disappeared = parse_sync_output(output, vendor)
 
                 sync_status['last_results'][vendor] = {
                     'success': True,
                     'total': total,
                     'new': new,
                     'updated': updated,
+                    'price_changes': price_changes,
                     'disappeared': disappeared
                 }
 
@@ -269,8 +277,8 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📦 Всего: {total}",
                         f"➕ Новых: {new}",
                     ]
-                    if updated > 0:
-                        report_parts.append(f"🔄 Изменений цен: {updated}")
+                    if price_changes > 0:
+                        report_parts.append(f"🔄 Изменений цен: {price_changes}")
                     report_parts.append(f"👻 Исчезло: {disappeared}")
                     report = "\n".join(report_parts)
                 else:
@@ -324,8 +332,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result.get('success'):
             text += f"  Всего: {result.get('total', 0)}\n"
             text += f"  Новых: {result.get('new', 0)}\n"
-            if result.get('updated', 0) > 0:
-                text += f"  Изменений цен: {result.get('updated', 0)}\n"
+            if result.get('price_changes', 0) > 0:
+                text += f"  Изменений цен: {result.get('price_changes', 0)}\n"
             text += f"  Исчезло: {result.get('disappeared', 0)}\n"
         text += "\n"
 
@@ -704,13 +712,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if result.returncode == 0:
                 output = stdout + stderr
                 
-                total, new, updated, disappeared = parse_sync_output(output, vendor)
+                total, new, updated, price_changes, disappeared = parse_sync_output(output, vendor)
 
                 sync_status['last_results'][vendor] = {
                     'success': True,
                     'total': total,
                     'new': new,
                     'updated': updated,
+                    'price_changes': price_changes,
                     'disappeared': disappeared,
                 }
 
@@ -723,8 +732,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📦 Всего: {total}",
                         f"➕ Новых: {new}",
                     ]
-                    if updated > 0:
-                        report_parts.append(f"🔄 Изменений цен: {updated}")
+                    if price_changes > 0:
+                        report_parts.append(f"🔄 Изменений цен: {price_changes}")
                     report_parts.append(f"👻 Исчезло: {disappeared}")
                     report = "\n".join(report_parts)
                 else:

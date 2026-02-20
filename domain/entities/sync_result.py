@@ -45,6 +45,11 @@ class SyncResult:
         """Общее количество изменений"""
         return self.new_items + self.updated_items + self.disappeared_items
 
+    @property
+    def price_changes_count(self) -> int:
+        """Количество позиций с изменением цены"""
+        return len(self.price_changes_list)
+
     def __str__(self):
         status = "✅" if self.success else "❌"
 
@@ -53,6 +58,7 @@ class SyncResult:
             f"total={self.total_items}, "
             f"new={self.new_items}, "
             f"updated={self.updated_items}, "
+            f"price_changes={self.price_changes_count}, "
             f"disappeared={self.disappeared_items}, "
             f"time={self.execution_time:.1f}s"
         )

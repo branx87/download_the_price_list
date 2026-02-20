@@ -17,25 +17,23 @@ class ReportService:
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(exist_ok=True, parents=True)
 
-    def cleanup_old_reports(self, days: int = 7) -> int:
-        """Удаляет отчёты старше указанного количества дней. Возвращает число удалённых файлов."""
-        cutoff = datetime.now() - timedelta(days=days)
+    def _delete_vendor_reports(self, vendor: str) -> int:
+        """Удаляет все существующие отчёты данного вендора. Возвращает число удалённых файлов."""
         deleted = 0
-        for f in self.reports_dir.glob("report_*.xlsx"):
-            if datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
-                try:
-                    f.unlink()
-                    deleted += 1
-                except Exception as e:
-                    logger.warning(f"[REPORT] Не удалось удалить {f.name}: {e}")
+        for f in self.reports_dir.glob(f"report_{vendor}_*.xlsx"):
+            try:
+                f.unlink()
+                deleted += 1
+            except Exception as e:
+                logger.warning(f"[REPORT] Не удалось удалить {f.name}: {e}")
         if deleted:
-            logger.info(f"[REPORT] Удалено старых отчётов: {deleted}")
+            logger.info(f"[REPORT] Удалено старых отчётов {vendor}: {deleted}")
         return deleted
 
     def create_report(self, vendor: str, result: SyncResult) -> Path:
         """
         Создаёт Excel отчёт с листами: новые/удалённые/изменения цен/сводка.
-        Перед созданием удаляет отчёты старше 7 дней.
+        Перед созданием удаляет предыдущие отчёты этого вендора.
 
         Args:
             vendor: Название вендора
@@ -44,7 +42,7 @@ class ReportService:
         Returns:
             Path к созданному файлу
         """
-        self.cleanup_old_reports(days=7)
+        self._delete_vendor_reports(vendor)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M')
         filename = f"report_{vendor}_{timestamp}.xlsx"
