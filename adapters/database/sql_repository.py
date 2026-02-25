@@ -741,6 +741,7 @@ class SqlRepository(IRepository):
                         FROM Total_Price tp
                         INNER JOIN #tmp_apc t
                             ON tp.Vendor = t.Vendor AND tp.Part_Num = t.Part_Num
+                        WHERE tp.ArticlePC IS NULL OR tp.ArticlePC = ''
                     """))
                     affected = result.rowcount
                     connection.execute(text("DROP TABLE #tmp_apc"))
@@ -756,6 +757,7 @@ class SqlRepository(IRepository):
                 SET ArticlePC = :article_pc,
                     updated_at = :updated_at
                 WHERE Vendor = :vendor AND Part_Num = :part_num
+                AND (ArticlePC IS NULL OR ArticlePC = '')
             """)
             affected = 0
             batch_size = 1000
@@ -763,9 +765,9 @@ class SqlRepository(IRepository):
                 try:
                     for i in range(0, len(all_data), batch_size):
                         connection = session.connection()
-                        connection.execute(query, all_data[i:i + batch_size])
+                        result = connection.execute(query, all_data[i:i + batch_size])
                         session.commit()
-                        affected += len(all_data[i:i + batch_size])
+                        affected += result.rowcount
                 except Exception as e:
                     logger.error(f"[FIX] Ошибка bulk_set_article_pc: {e}", exc_info=True)
                     session.rollback()
@@ -777,11 +779,22 @@ class SqlRepository(IRepository):
             f"[FIX] bulk_set_article_pc ({method}): {affected}/{len(all_data)} обновлено "
             f"за {elapsed:.1f}с ({affected / elapsed:.0f} rec/s)"
         )
-        if affected == 0 and len(all_data) > 0:
-            logger.warning(
-                f"[FIX] bulk_set_article_pc: 0 строк обновлено при {len(all_data)} входных записях — "
-                f"несоответствие Vendor/Part_Num между кодом и БД"
-            )
+        if affected < len(all_data):
+            if affected == 0:
+                logger.warning(
+                    f"[FIX] bulk_set_article_pc: 0 строк обновлено при {len(all_data)} входных записях — "
+                    f"несоответствие Vendor/Part_Num между кодом и БД"
+                )
+            else:
+                logger.warning(
+                    f"[FIX] bulk_set_article_pc: {affected}/{len(all_data)} строк обновлено — "
+                    f"часть записей не найдена по Vendor/Part_Num"
+                )
+            for item in all_data[:5]:
+                logger.warning(
+                    f"[FIX] Пример необновлённого: vendor={item['vendor']!r} "
+                    f"part_num={item['part_num']!r} article_pc={item['article_pc']!r}"
+                )
         return affected
 
     def get_all_article_pcs(self) -> set:
@@ -800,20 +813,98 @@ class SqlRepository(IRepository):
 
     def get_all_vendor_part_num_pairs(self) -> list:
         """
-        Получить все существующие пары Vendor+Part_Num из БД — БЕЗ нормализации.
+        Получить все существующие пары Vendor+Part_Num+ArticlePC из БД — БЕЗ нормализации.
 
-        Возвращает оригинальные значения как они хранятся в БД.
-        Нормализация для lookup выполняется в erp_sync_service.py,
-        чтобы для UPDATE использовался оригинальный Part_Num (а не нормализованный).
-        Это позволяет сохранять артикулы с пробелами — например 'ШМТ осн 80х8'.
+        Возвращает кортежи (vendor_raw, part_num_raw, article_pc_upper) где:
+        - vendor_raw, part_num_raw — оригинальные значения из БД (для UPDATE)
+        - article_pc_upper — .strip().upper() от ArticlePC (для сравнения с 1C кодом)
         """
         with self.SessionLocal() as session:
             query = text(f"""
-                SELECT Vendor, Part_Num FROM Total_Price {self._nolock}
+                SELECT Vendor, Part_Num, ArticlePC FROM Total_Price {self._nolock}
                 WHERE Part_Num IS NOT NULL AND Part_Num != ''
             """)
             result = session.execute(query)
-            return [(row[0] or '', row[1] or '') for row in result]
+            return [
+                (row[0] or '', row[1] or '', (row[2] or '').strip().upper())
+                for row in result
+            ]
+
+    def bulk_update_raw_values(self, items: list) -> int:
+        """
+        Обновляет Vendor и Part_Num до оригинальных (raw) значений из 1C.
+        Поиск по ArticlePC — уникальному идентификатору.
+        items: list of {vendor, part_num, article_pc}
+        """
+        if not items:
+            return 0
+
+        current_time = datetime.now()
+        all_data = [
+            {
+                'vendor': self._safe_str(item['vendor']),
+                'part_num': self._safe_str(item['part_num']),
+                'article_pc': self._safe_str(item['article_pc']),
+                'updated_at': current_time
+            }
+            for item in items
+        ]
+
+        if not self.is_sqlite:
+            with self.SessionLocal() as session:
+                try:
+                    connection = session.connection()
+                    connection.execute(text("""
+                        CREATE TABLE #tmp_raw_upd (
+                            ArticlePC NVARCHAR(255),
+                            Vendor NVARCHAR(255),
+                            Part_Num NVARCHAR(255),
+                            updated_at DATETIME
+                        )
+                    """))
+                    for i in range(0, len(all_data), 1000):
+                        connection.execute(text("""
+                            INSERT INTO #tmp_raw_upd (ArticlePC, Vendor, Part_Num, updated_at)
+                            VALUES (:article_pc, :vendor, :part_num, :updated_at)
+                        """), all_data[i:i + 1000])
+                    result = connection.execute(text("""
+                        UPDATE tp
+                        SET tp.Vendor = t.Vendor,
+                            tp.Part_Num = t.Part_Num,
+                            tp.updated_at = t.updated_at
+                        FROM Total_Price tp
+                        INNER JOIN #tmp_raw_upd t ON tp.ArticlePC = t.ArticlePC
+                    """))
+                    affected = result.rowcount
+                    connection.execute(text("DROP TABLE #tmp_raw_upd"))
+                    session.commit()
+                except Exception as e:
+                    logger.error(f"[FIX] Ошибка bulk_update_raw_values: {e}", exc_info=True)
+                    session.rollback()
+                    raise
+        else:
+            query = text("""
+                UPDATE Total_Price
+                SET Vendor = :vendor,
+                    Part_Num = :part_num,
+                    updated_at = :updated_at
+                WHERE ArticlePC = :article_pc
+            """)
+            affected = 0
+            with self.SessionLocal() as session:
+                try:
+                    for i in range(0, len(all_data), 1000):
+                        connection = session.connection()
+                        result = connection.execute(query, all_data[i:i + 1000])
+                        session.commit()
+                        affected += result.rowcount
+                except Exception as e:
+                    logger.error(f"[FIX] Ошибка bulk_update_raw_values: {e}", exc_info=True)
+                    session.rollback()
+                    raise
+
+        logger.info(f"[FIX] bulk_update_raw_values: {affected}/{len(items)} vendor/part_num обновлено до raw значений из 1C")
+        return affected
 
     def reset_changed_status(self, vendor: str) -> int:
         """Сбросить статус price_changed/new/NULL на active после синхронизации"""
@@ -900,6 +991,106 @@ class SqlRepository(IRepository):
         if vendor in synonyms_map:
             return synonyms_map[vendor]
         return default if default is not None else vendor
+
+    # ========== Duplicates ==========
+
+    def get_duplicates_info(self) -> dict:
+        """Возвращает количество групп дублей и лишних строк в Total_Price"""
+        try:
+            with self.SessionLocal() as session:
+                result = session.execute(text(f"""
+                    SELECT COUNT(*) AS dup_groups, SUM(cnt - 1) AS excess_rows
+                    FROM (
+                        SELECT Vendor, Part_Num, COUNT(*) AS cnt
+                        FROM Total_Price {self._nolock}
+                        GROUP BY Vendor, Part_Num
+                        HAVING COUNT(*) > 1
+                    ) t
+                """))
+                row = result.fetchone()
+                if row and row[0]:
+                    return {'groups': int(row[0]), 'excess_rows': int(row[1])}
+                return {'groups': 0, 'excess_rows': 0}
+        except Exception as e:
+            logger.error(f"[DUPLICATES] Ошибка получения статистики дублей: {e}")
+            return {'groups': 0, 'excess_rows': 0}
+
+    def get_duplicates_sample(self) -> list:
+        """Возвращает до 10 групп-дублей для предпросмотра"""
+        try:
+            with self.SessionLocal() as session:
+                if self.is_sqlite:
+                    query = text(f"""
+                        SELECT Vendor, Part_Num, COUNT(*) AS cnt
+                        FROM Total_Price
+                        GROUP BY Vendor, Part_Num
+                        HAVING COUNT(*) > 1
+                        ORDER BY cnt DESC
+                        LIMIT 10
+                    """)
+                else:
+                    query = text(f"""
+                        SELECT TOP 10 Vendor, Part_Num, COUNT(*) AS cnt
+                        FROM Total_Price {self._nolock}
+                        GROUP BY Vendor, Part_Num
+                        HAVING COUNT(*) > 1
+                        ORDER BY cnt DESC
+                    """)
+                result = session.execute(query)
+                return [
+                    {'vendor': row[0], 'part_num': row[1], 'count': int(row[2])}
+                    for row in result
+                ]
+        except Exception as e:
+            logger.error(f"[DUPLICATES] Ошибка получения примеров дублей: {e}")
+            return []
+
+    def delete_duplicates(self) -> int:
+        """Удаляет дубли по ключу Vendor+Part_Num.
+
+        Приоритет оставляемой строки:
+        1. Строка с заполненным ArticlePC (код 1С-ERP)
+        2. При равенстве — самая свежая по updated_at
+        """
+        try:
+            with self.SessionLocal() as session:
+                if self.is_sqlite:
+                    result = session.execute(text("""
+                        DELETE FROM Total_Price
+                        WHERE rowid NOT IN (
+                            SELECT rowid FROM (
+                                SELECT rowid,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY Vendor, Part_Num
+                                        ORDER BY
+                                            CASE WHEN ArticlePC IS NOT NULL AND TRIM(ArticlePC) != '' THEN 0 ELSE 1 END ASC,
+                                            updated_at DESC
+                                    ) AS rn
+                                FROM Total_Price
+                            ) t WHERE rn = 1
+                        )
+                    """))
+                else:
+                    result = session.execute(text("""
+                        WITH CTE AS (
+                            SELECT *,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY Vendor, Part_Num
+                                    ORDER BY
+                                        CASE WHEN ArticlePC IS NOT NULL AND LTRIM(RTRIM(ArticlePC)) != '' THEN 0 ELSE 1 END ASC,
+                                        updated_at DESC
+                                ) AS rn
+                            FROM Total_Price
+                        )
+                        DELETE FROM CTE WHERE rn > 1
+                    """))
+                session.commit()
+                deleted = result.rowcount
+                logger.info(f"[DUPLICATES] Удалено {deleted} дублей из Total_Price")
+                return deleted
+        except Exception as e:
+            logger.error(f"[DUPLICATES] Ошибка удаления дублей: {e}", exc_info=True)
+            raise
 
     def backfill_vendor_for_filter(self, synonyms_map: dict) -> int:
         """Заполнить VendorForFilter для записей где он NULL или пустой"""

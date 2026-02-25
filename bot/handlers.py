@@ -72,6 +72,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /add_synonym - Добавить синоним
 /del_synonym - Удалить синоним
 /backfill_vff - Заполнить VendorForFilter
+/duplicates - Найти и удалить дубли
 /db_copy - Скопировать БД из MSSQL
 /status - Статус
 /debug - Показать ошибки
@@ -360,6 +361,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /add_synonym <Vendor> <VendorForFilter> - Добавить синоним
 /del_synonym - Удалить синоним
 /backfill_vff - Заполнить VendorForFilter
+/duplicates - Найти и удалить дубли в Total_Price
 /db_copy - Скопировать БД из MSSQL
 /status - Статус синхронизаций
 /debug - Показать ошибки
@@ -546,6 +548,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопок"""
     query = update.callback_query
     await query.answer()
+
+    if query.data == 'dup_preview':
+        repository = SqlRepository(settings.DATABASE_URL)
+        samples = repository.get_duplicates_sample()
+        if not samples:
+            await query.edit_message_text("✅ Дублей не найдено!")
+            return
+        lines = ["🔍 Примеры дублей (топ 10):\n"]
+        for s in samples:
+            lines.append(f"• {s['vendor']} | {s['part_num']}  — {s['count']} шт.")
+        keyboard = [[InlineKeyboardButton("🗑 Удалить все дубли", callback_data="dup_delete")]]
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if query.data == 'dup_delete':
+        await query.edit_message_text("⏳ Удаляю дубли...")
+        try:
+            repository = SqlRepository(settings.DATABASE_URL)
+            deleted = repository.delete_duplicates()
+            await query.edit_message_text(
+                f"✅ Готово!\n\n"
+                f"🗑 Удалено строк: {deleted}\n"
+                f"💾 Сохранены строки с ArticlePC или самые свежие."
+            )
+        except Exception as e:
+            logger.error(f"Ошибка удаления дублей: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
+        return
 
     if query.data.startswith('del_syn_'):
         syn_id = int(query.data.replace('del_syn_', ''))
@@ -846,6 +879,30 @@ async def del_synonym_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     ]
     await update.message.reply_text(
         "Выберите синоним для удаления:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def duplicates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /duplicates - найти и удалить дубли в Total_Price"""
+    repository = SqlRepository(settings.DATABASE_URL)
+    info = repository.get_duplicates_info()
+
+    if info['groups'] == 0:
+        await update.message.reply_text("✅ Дублей в Total_Price не найдено.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("🔍 Показать примеры", callback_data="dup_preview")],
+        [InlineKeyboardButton("🗑 Удалить дубли", callback_data="dup_delete")],
+    ]
+    await update.message.reply_text(
+        f"⚠️ Найдены дубли в Total_Price:\n\n"
+        f"📊 Групп с дублями: {info['groups']}\n"
+        f"🗑 Лишних строк: {info['excess_rows']}\n\n"
+        f"Стратегия удаления:\n"
+        f"• Сохраняется строка с заполненным ArticlePC (код 1С-ERP)\n"
+        f"• При равенстве — самая свежая по updated_at",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
