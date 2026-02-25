@@ -26,6 +26,8 @@ from bot.handlers import (
     del_synonym_command,
     backfill_vff_command,
     duplicates_command,
+    labor_command,
+    labor_edit_command,
     button_callback
 )
 
@@ -87,6 +89,8 @@ def main():
     app.add_handler(CommandHandler("del_synonym", del_synonym_command))
     app.add_handler(CommandHandler("backfill_vff", backfill_vff_command))
     app.add_handler(CommandHandler("duplicates", duplicates_command))
+    app.add_handler(CommandHandler("labor", labor_command))
+    app.add_handler(CommandHandler("labor_edit", labor_edit_command))
 
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_callback))

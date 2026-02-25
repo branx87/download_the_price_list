@@ -25,6 +25,10 @@ _last_erp_result = {
     'result': None,
 }
 
+# Кэш записей Total_Labor для пагинации и удаления по индексу
+_labor_cache: list = []
+_LABOR_PAGE_SIZE = 10
+
 PROJECT_ROOT = settings.PROJECT_ROOT
 
 sync_status = {
@@ -73,6 +77,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /del_synonym - Удалить синоним
 /backfill_vff - Заполнить VendorForFilter
 /duplicates - Найти и удалить дубли
+/labor - Управление трудозатратами
+/labor_edit - Изменить значение трудозатрат
 /db_copy - Скопировать БД из MSSQL
 /status - Статус
 /debug - Показать ошибки
@@ -362,6 +368,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /del_synonym - Удалить синоним
 /backfill_vff - Заполнить VendorForFilter
 /duplicates - Найти и удалить дубли в Total_Price
+/labor - Управление таблицей трудозатрат
+/labor_edit <Category> <Value> - Изменить трудозатраты
 /db_copy - Скопировать БД из MSSQL
 /status - Статус синхронизаций
 /debug - Показать ошибки
@@ -548,6 +556,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопок"""
     query = update.callback_query
     await query.answer()
+
+    if query.data == 'labor_noop':
+        return
+
+    if query.data.startswith('labor_page_'):
+        page = int(query.data.replace('labor_page_', ''))
+        await _send_labor_page(query, page)
+        return
+
+    if query.data.startswith('labor_del_'):
+        idx = int(query.data.replace('labor_del_', ''))
+        if not _labor_cache or idx >= len(_labor_cache):
+            await query.edit_message_text("⚠️ Список устарел. Выполните /labor заново.")
+            return
+        item = _labor_cache[idx]
+        category = item['category']
+        try:
+            repository = SqlRepository(settings.DATABASE_URL)
+            repository.delete_labor_item(category)
+            _labor_cache.pop(idx)
+            if _labor_cache:
+                page = idx // _LABOR_PAGE_SIZE
+                total_pages = (len(_labor_cache) + _LABOR_PAGE_SIZE - 1) // _LABOR_PAGE_SIZE
+                page = min(page, total_pages - 1)
+                await _send_labor_page(query, page)
+            else:
+                await query.edit_message_text("✅ Все записи удалены. Таблица пуста.")
+        except Exception as e:
+            logger.error(f"Ошибка удаления labor: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
+        return
 
     if query.data == 'dup_preview':
         repository = SqlRepository(settings.DATABASE_URL)
@@ -881,6 +920,110 @@ async def del_synonym_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "Выберите синоним для удаления:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+async def _send_labor_page(target, page: int):
+    """Отправляет или обновляет страницу трудозатрат.
+    target — Message (при первом вызове) или CallbackQuery (при навигации).
+    """
+    from telegram import Message as TgMessage
+    items = _labor_cache
+    if not items:
+        text = "⚠️ Список устарел. Выполните /labor заново."
+        if isinstance(target, TgMessage):
+            await target.reply_text(text)
+        else:
+            await target.edit_message_text(text)
+        return
+
+    total_pages = (len(items) + _LABOR_PAGE_SIZE - 1) // _LABOR_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    start = page * _LABOR_PAGE_SIZE
+    page_items = items[start:start + _LABOR_PAGE_SIZE]
+
+    lines = [f"📋 Трудозатраты (стр. {page + 1}/{total_pages}, всего {len(items)}):\n"]
+    for i, item in enumerate(page_items):
+        cat = item['category'] or '(пусто)'
+        val = item['labor']
+        lines.append(f"{start + i + 1}. {cat} — {val}")
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🗑 {item['category'] or '(пусто)'}",
+            callback_data=f"labor_del_{start + i}"
+        )]
+        for i, item in enumerate(page_items)
+    ]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀ Назад", callback_data=f"labor_page_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="labor_noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("Вперед ▶", callback_data=f"labor_page_{page + 1}"))
+    keyboard.append(nav)
+
+    text = "\n".join(lines)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if isinstance(target, TgMessage):
+        await target.reply_text(text, reply_markup=reply_markup)
+    else:
+        await target.edit_message_text(text, reply_markup=reply_markup)
+
+
+async def labor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /labor - просмотр и удаление записей Total_Labor"""
+    global _labor_cache
+    repository = SqlRepository(settings.DATABASE_URL)
+    _labor_cache = repository.get_labor_items()
+
+    if not _labor_cache:
+        await update.message.reply_text("📋 Таблица Total_Labor пуста.")
+        return
+
+    await _send_labor_page(update.message, 0)
+
+
+async def labor_edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /labor_edit <Category> <NewValue> - изменить значение трудозатрат.
+    Последний аргумент — новое значение, всё перед ним — название категории.
+    Пример: /labor_edit Корпуса сборка 6.588
+    """
+    global _labor_cache
+    args = context.args
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "Использование: /labor_edit <Category> <Value>\n\n"
+            "Примеры:\n"
+            "/labor_edit АВ-М-1-1П 0.324\n"
+            "/labor_edit Корпуса сборка 6.588\n\n"
+            "Последнее слово — новое значение.\n"
+            "Всё перед ним — название категории."
+        )
+        return
+
+    try:
+        new_value = float(args[-1].replace(',', '.'))
+        category = ' '.join(args[:-1])
+    except ValueError:
+        await update.message.reply_text(f"❌ Некорректное значение: {args[-1]!r}")
+        return
+
+    try:
+        repository = SqlRepository(settings.DATABASE_URL)
+        updated = repository.update_labor_item(category, new_value)
+        if updated:
+            _labor_cache = repository.get_labor_items()
+            await update.message.reply_text(f"✅ Обновлено: {category} → {new_value}")
+        else:
+            await update.message.reply_text(
+                f"⚠️ Категория не найдена: {category!r}\n\n"
+                f"Проверьте название через /labor"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка labor_edit: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
 
 
 async def duplicates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

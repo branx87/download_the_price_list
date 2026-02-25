@@ -1092,6 +1092,46 @@ class SqlRepository(IRepository):
             logger.error(f"[DUPLICATES] Ошибка удаления дублей: {e}", exc_info=True)
             raise
 
+    # ========== Total_Labor ==========
+
+    def get_labor_items(self) -> list:
+        """Получить все записи из Total_Labor"""
+        try:
+            with self.SessionLocal() as session:
+                result = session.execute(text(
+                    "SELECT Category, Labor FROM Total_Labor ORDER BY Category"
+                ))
+                return [{'category': row[0] or '', 'labor': row[1]} for row in result]
+        except Exception as e:
+            logger.error(f"[LABOR] Ошибка получения трудозатрат: {e}")
+            return []
+
+    def delete_labor_item(self, category: str) -> int:
+        """Удалить запись из Total_Labor по Category (поддерживает пустую строку)"""
+        with self.SessionLocal() as session:
+            if self.is_sqlite:
+                query = text("DELETE FROM Total_Labor WHERE COALESCE(Category, '') = :category")
+            else:
+                query = text("DELETE FROM Total_Labor WHERE ISNULL(Category, '') = :category")
+            result = session.execute(query, {'category': category})
+            session.commit()
+            deleted = result.rowcount
+            logger.info(f"[LABOR] Удалена категория: {category!r} ({deleted} строк)")
+            return deleted
+
+    def update_labor_item(self, category: str, new_value: float) -> int:
+        """Обновить значение Labor для категории в Total_Labor"""
+        with self.SessionLocal() as session:
+            result = session.execute(
+                text("UPDATE Total_Labor SET Labor = :value WHERE Category = :category"),
+                {'value': new_value, 'category': category}
+            )
+            session.commit()
+            updated = result.rowcount
+            if updated:
+                logger.info(f"[LABOR] Обновлено: {category!r} = {new_value}")
+            return updated
+
     def backfill_vendor_for_filter(self, synonyms_map: dict) -> int:
         """Заполнить VendorForFilter для записей где он NULL или пустой"""
         total_updated = 0
