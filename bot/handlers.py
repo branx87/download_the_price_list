@@ -592,12 +592,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         repository = SqlRepository(settings.DATABASE_URL)
         samples = repository.get_duplicates_sample()
         if not samples:
-            await query.edit_message_text("✅ Дублей не найдено!")
+            await query.edit_message_text("✅ Дублей (по Вендор+Арт) не найдено!")
             return
-        lines = ["🔍 Примеры дублей (топ 10):\n"]
+        lines = ["🔍 Дубли по Производитель+Артикул (топ 10):\n"]
         for s in samples:
             lines.append(f"• {s['vendor']} | {s['part_num']}  — {s['count']} шт.")
-        keyboard = [[InlineKeyboardButton("🗑 Удалить все дубли", callback_data="dup_delete")]]
+        keyboard = [[InlineKeyboardButton("🗑 Удалить все дубли (Вендор+Арт)", callback_data="dup_delete")]]
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if query.data == 'dup_apc_preview':
+        repository = SqlRepository(settings.DATABASE_URL)
+        samples = repository.get_duplicates_sample_by_article_pc()
+        if not samples:
+            await query.edit_message_text("✅ Дублей по ArticlePC не найдено!")
+            return
+        lines = ["🔍 Дубли по ArticlePC (топ 10):\n"]
+        for s in samples:
+            lines.append(f"• {s['article_pc']}  — {s['count']} записей")
+        keyboard = [[InlineKeyboardButton("🗑 Удалить все дубли (ArticlePC)", callback_data="dup_apc_delete")]]
         await query.edit_message_text(
             "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -605,17 +621,53 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == 'dup_delete':
-        await query.edit_message_text("⏳ Удаляю дубли...")
+        await query.edit_message_text("⏳ Удаляю дубли по Производитель+Артикул...")
         try:
             repository = SqlRepository(settings.DATABASE_URL)
-            deleted = repository.delete_duplicates()
-            await query.edit_message_text(
-                f"✅ Готово!\n\n"
-                f"🗑 Удалено строк: {deleted}\n"
-                f"💾 Сохранены строки с ArticlePC или самые свежие."
-            )
+            deleted, deleted_items = repository.delete_duplicates()
+            lines = [
+                f"✅ Готово!\n",
+                f"🗑 Удалено строк: {deleted}",
+                f"💾 Сохранены строки с ArticlePC или самые свежие.\n",
+            ]
+            if deleted_items:
+                lines.append(f"Удалённые записи (первые {len(deleted_items)}):")
+                for item in deleted_items:
+                    apc = f" [{item['article_pc']}]" if item['article_pc'] else ""
+                    lines.append(f"• {item['vendor']} | {item['part_num']}{apc}")
+                if deleted > len(deleted_items):
+                    lines.append(f"... и ещё {deleted - len(deleted_items)}")
+            report = "\n".join(lines)
+            if len(report) > 4000:
+                report = report[:3900] + "\n\n... (обрезано)"
+            await query.edit_message_text(report)
         except Exception as e:
             logger.error(f"Ошибка удаления дублей: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
+        return
+
+    if query.data == 'dup_apc_delete':
+        await query.edit_message_text("⏳ Удаляю дубли по ArticlePC...")
+        try:
+            repository = SqlRepository(settings.DATABASE_URL)
+            deleted, deleted_items = repository.delete_duplicates_by_article_pc()
+            lines = [
+                f"✅ Готово!\n",
+                f"🗑 Удалено строк: {deleted}",
+                f"💾 Сохранены строки с Вендором или самые свежие.\n",
+            ]
+            if deleted_items:
+                lines.append(f"Удалённые записи (первые {len(deleted_items)}):")
+                for item in deleted_items:
+                    lines.append(f"• {item['article_pc']} | {item['vendor']} | {item['part_num']}")
+                if deleted > len(deleted_items):
+                    lines.append(f"... и ещё {deleted - len(deleted_items)}")
+            report = "\n".join(lines)
+            if len(report) > 4000:
+                report = report[:3900] + "\n\n... (обрезано)"
+            await query.edit_message_text(report)
+        except Exception as e:
+            logger.error(f"Ошибка удаления дублей по ArticlePC: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
         return
 
@@ -1029,23 +1081,41 @@ async def labor_edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def duplicates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /duplicates - найти и удалить дубли в Total_Price"""
     repository = SqlRepository(settings.DATABASE_URL)
-    info = repository.get_duplicates_info()
+    info_vp = repository.get_duplicates_info()
+    info_apc = repository.get_duplicates_info_by_article_pc()
 
-    if info['groups'] == 0:
+    if info_vp['groups'] == 0 and info_apc['groups'] == 0:
         await update.message.reply_text("✅ Дублей в Total_Price не найдено.")
         return
 
-    keyboard = [
-        [InlineKeyboardButton("🔍 Показать примеры", callback_data="dup_preview")],
-        [InlineKeyboardButton("🗑 Удалить дубли", callback_data="dup_delete")],
-    ]
+    lines = ["⚠️ Найдены дубли в Total_Price:\n"]
+
+    keyboard = []
+
+    if info_vp['groups'] > 0:
+        lines.append(
+            f"📦 По Производитель+Артикул:\n"
+            f"  Групп: {info_vp['groups']}, лишних строк: {info_vp['excess_rows']}\n"
+            f"  (сохраняется строка с ArticlePC или самая свежая)"
+        )
+        keyboard.append([
+            InlineKeyboardButton("🔍 Примеры (Вендор+Арт)", callback_data="dup_preview"),
+            InlineKeyboardButton("🗑 Удалить (Вендор+Арт)", callback_data="dup_delete"),
+        ])
+
+    if info_apc['groups'] > 0:
+        lines.append(
+            f"\n🔑 По ArticlePC (код 1С):\n"
+            f"  Групп: {info_apc['groups']}, лишних строк: {info_apc['excess_rows']}\n"
+            f"  (сохраняется строка с Вендором или самая свежая)"
+        )
+        keyboard.append([
+            InlineKeyboardButton("🔍 Примеры (ArticlePC)", callback_data="dup_apc_preview"),
+            InlineKeyboardButton("🗑 Удалить (ArticlePC)", callback_data="dup_apc_delete"),
+        ])
+
     await update.message.reply_text(
-        f"⚠️ Найдены дубли в Total_Price:\n\n"
-        f"📊 Групп с дублями: {info['groups']}\n"
-        f"🗑 Лишних строк: {info['excess_rows']}\n\n"
-        f"Стратегия удаления:\n"
-        f"• Сохраняется строка с заполненным ArticlePC (код 1С-ERP)\n"
-        f"• При равенстве — самая свежая по updated_at",
+        "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 

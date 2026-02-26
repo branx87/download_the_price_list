@@ -832,19 +832,21 @@ class SqlRepository(IRepository):
 
     def bulk_update_raw_values(self, items: list) -> int:
         """
-        Обновляет Vendor и Part_Num до оригинальных (raw) значений из 1C.
+        Обновляет Vendor, Part_Num и (опционально) Descr до оригинальных значений из 1C.
         Поиск по ArticlePC — уникальному идентификатору.
-        items: list of {vendor, part_num, article_pc}
+        items: list of {vendor, part_num, article_pc, descr?}
         """
         if not items:
             return 0
 
+        has_descr = any('descr' in item for item in items)
         current_time = datetime.now()
         all_data = [
             {
                 'vendor': self._safe_str(item['vendor']),
                 'part_num': self._safe_str(item['part_num']),
                 'article_pc': self._safe_str(item['article_pc']),
+                'descr': self._safe_str(item.get('descr', '')),
                 'updated_at': current_time
             }
             for item in items
@@ -859,19 +861,21 @@ class SqlRepository(IRepository):
                             ArticlePC NVARCHAR(255),
                             Vendor NVARCHAR(255),
                             Part_Num NVARCHAR(255),
+                            Descr NVARCHAR(512),
                             updated_at DATETIME
                         )
                     """))
                     for i in range(0, len(all_data), 1000):
                         connection.execute(text("""
-                            INSERT INTO #tmp_raw_upd (ArticlePC, Vendor, Part_Num, updated_at)
-                            VALUES (:article_pc, :vendor, :part_num, :updated_at)
+                            INSERT INTO #tmp_raw_upd (ArticlePC, Vendor, Part_Num, Descr, updated_at)
+                            VALUES (:article_pc, :vendor, :part_num, :descr, :updated_at)
                         """), all_data[i:i + 1000])
-                    result = connection.execute(text("""
+                    set_clause = "tp.Vendor = t.Vendor, tp.Part_Num = t.Part_Num, tp.updated_at = t.updated_at"
+                    if has_descr:
+                        set_clause += ", tp.Descr = t.Descr"
+                    result = connection.execute(text(f"""
                         UPDATE tp
-                        SET tp.Vendor = t.Vendor,
-                            tp.Part_Num = t.Part_Num,
-                            tp.updated_at = t.updated_at
+                        SET {set_clause}
                         FROM Total_Price tp
                         INNER JOIN #tmp_raw_upd t ON tp.ArticlePC = t.ArticlePC
                     """))
@@ -883,11 +887,12 @@ class SqlRepository(IRepository):
                     session.rollback()
                     raise
         else:
-            query = text("""
+            set_clause = "Vendor = :vendor, Part_Num = :part_num, updated_at = :updated_at"
+            if has_descr:
+                set_clause += ", Descr = :descr"
+            query = text(f"""
                 UPDATE Total_Price
-                SET Vendor = :vendor,
-                    Part_Num = :part_num,
-                    updated_at = :updated_at
+                SET {set_clause}
                 WHERE ArticlePC = :article_pc
             """)
             affected = 0
@@ -903,7 +908,8 @@ class SqlRepository(IRepository):
                     session.rollback()
                     raise
 
-        logger.info(f"[FIX] bulk_update_raw_values: {affected}/{len(items)} vendor/part_num обновлено до raw значений из 1C")
+        fields_updated = "vendor/part_num" + ("/descr" if has_descr else "")
+        logger.info(f"[FIX] bulk_update_raw_values: {affected}/{len(items)} {fields_updated} обновлено до raw значений из 1C")
         return affected
 
     def reset_changed_status(self, vendor: str) -> int:
@@ -1045,15 +1051,58 @@ class SqlRepository(IRepository):
             logger.error(f"[DUPLICATES] Ошибка получения примеров дублей: {e}")
             return []
 
-    def delete_duplicates(self) -> int:
+    def delete_duplicates(self) -> tuple:
         """Удаляет дубли по ключу Vendor+Part_Num.
 
         Приоритет оставляемой строки:
         1. Строка с заполненным ArticlePC (код 1С-ERP)
         2. При равенстве — самая свежая по updated_at
+
+        Returns:
+            (deleted_count, deleted_items) где deleted_items — список dict {vendor, part_num, article_pc}
         """
         try:
             with self.SessionLocal() as session:
+                # Сначала получаем строки, которые будут удалены (до 50 для отчёта)
+                if self.is_sqlite:
+                    preview_query = text("""
+                        SELECT Vendor, Part_Num, ArticlePC
+                        FROM Total_Price
+                        WHERE rowid NOT IN (
+                            SELECT rowid FROM (
+                                SELECT rowid,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY Vendor, Part_Num
+                                        ORDER BY
+                                            CASE WHEN ArticlePC IS NOT NULL AND TRIM(ArticlePC) != '' THEN 0 ELSE 1 END ASC,
+                                            updated_at DESC
+                                    ) AS rn
+                                FROM Total_Price
+                            ) t WHERE rn = 1
+                        )
+                        LIMIT 50
+                    """)
+                else:
+                    preview_query = text(f"""
+                        SELECT TOP 50 Vendor, Part_Num, ArticlePC
+                        FROM (
+                            SELECT *,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY Vendor, Part_Num
+                                    ORDER BY
+                                        CASE WHEN ArticlePC IS NOT NULL AND LTRIM(RTRIM(ArticlePC)) != '' THEN 0 ELSE 1 END ASC,
+                                        updated_at DESC
+                                ) AS rn
+                            FROM Total_Price {self._nolock}
+                        ) t WHERE rn > 1
+                    """)
+                preview_rows = session.execute(preview_query).fetchall()
+                deleted_items = [
+                    {'vendor': row[0], 'part_num': row[1], 'article_pc': row[2] or ''}
+                    for row in preview_rows
+                ]
+
+                # Удаляем дубли
                 if self.is_sqlite:
                     result = session.execute(text("""
                         DELETE FROM Total_Price
@@ -1087,9 +1136,159 @@ class SqlRepository(IRepository):
                 session.commit()
                 deleted = result.rowcount
                 logger.info(f"[DUPLICATES] Удалено {deleted} дублей из Total_Price")
-                return deleted
+                return deleted, deleted_items
         except Exception as e:
             logger.error(f"[DUPLICATES] Ошибка удаления дублей: {e}", exc_info=True)
+            raise
+
+    def get_duplicates_info_by_article_pc(self) -> dict:
+        """Возвращает количество групп дублей по ArticlePC и лишних строк"""
+        try:
+            with self.SessionLocal() as session:
+                result = session.execute(text(f"""
+                    SELECT COUNT(*) AS dup_groups, SUM(cnt - 1) AS excess_rows
+                    FROM (
+                        SELECT ArticlePC, COUNT(*) AS cnt
+                        FROM Total_Price {self._nolock}
+                        WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                        GROUP BY ArticlePC
+                        HAVING COUNT(*) > 1
+                    ) t
+                """))
+                row = result.fetchone()
+                if row and row[0]:
+                    return {'groups': int(row[0]), 'excess_rows': int(row[1])}
+                return {'groups': 0, 'excess_rows': 0}
+        except Exception as e:
+            logger.error(f"[DUPLICATES] Ошибка получения статистики дублей по ArticlePC: {e}")
+            return {'groups': 0, 'excess_rows': 0}
+
+    def get_duplicates_sample_by_article_pc(self) -> list:
+        """Возвращает до 10 групп-дублей по ArticlePC для предпросмотра"""
+        try:
+            with self.SessionLocal() as session:
+                if self.is_sqlite:
+                    query = text("""
+                        SELECT ArticlePC, COUNT(*) AS cnt
+                        FROM Total_Price
+                        WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                        GROUP BY ArticlePC
+                        HAVING COUNT(*) > 1
+                        ORDER BY cnt DESC
+                        LIMIT 10
+                    """)
+                else:
+                    query = text(f"""
+                        SELECT TOP 10 ArticlePC, COUNT(*) AS cnt
+                        FROM Total_Price {self._nolock}
+                        WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                        GROUP BY ArticlePC
+                        HAVING COUNT(*) > 1
+                        ORDER BY cnt DESC
+                    """)
+                result = session.execute(query)
+                return [
+                    {'article_pc': row[0], 'count': int(row[1])}
+                    for row in result
+                ]
+        except Exception as e:
+            logger.error(f"[DUPLICATES] Ошибка получения примеров дублей по ArticlePC: {e}")
+            return []
+
+    def delete_duplicates_by_article_pc(self) -> tuple:
+        """Удаляет дубли по ArticlePC (несколько записей с одинаковым кодом 1С).
+
+        Приоритет оставляемой строки:
+        1. Строка с заполненным Vendor (данные из прайс-листа)
+        2. При равенстве — самая свежая по updated_at
+
+        Returns:
+            (deleted_count, deleted_items) где deleted_items — список dict {vendor, part_num, article_pc}
+        """
+        try:
+            with self.SessionLocal() as session:
+                # Сначала получаем строки, которые будут удалены (до 50 для отчёта)
+                if self.is_sqlite:
+                    preview_query = text("""
+                        SELECT Vendor, Part_Num, ArticlePC
+                        FROM Total_Price
+                        WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                        AND rowid NOT IN (
+                            SELECT rowid FROM (
+                                SELECT rowid,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY ArticlePC
+                                        ORDER BY
+                                            CASE WHEN Vendor IS NOT NULL AND TRIM(Vendor) != '' THEN 0 ELSE 1 END ASC,
+                                            updated_at DESC
+                                    ) AS rn
+                                FROM Total_Price
+                                WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                            ) t WHERE rn = 1
+                        )
+                        LIMIT 50
+                    """)
+                else:
+                    preview_query = text(f"""
+                        SELECT TOP 50 Vendor, Part_Num, ArticlePC
+                        FROM (
+                            SELECT *,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY ArticlePC
+                                    ORDER BY
+                                        CASE WHEN Vendor IS NOT NULL AND LTRIM(RTRIM(Vendor)) != '' THEN 0 ELSE 1 END ASC,
+                                        updated_at DESC
+                                ) AS rn
+                            FROM Total_Price {self._nolock}
+                            WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                        ) t WHERE rn > 1
+                    """)
+                preview_rows = session.execute(preview_query).fetchall()
+                deleted_items = [
+                    {'vendor': row[0], 'part_num': row[1], 'article_pc': row[2] or ''}
+                    for row in preview_rows
+                ]
+
+                # Удаляем дубли
+                if self.is_sqlite:
+                    result = session.execute(text("""
+                        DELETE FROM Total_Price
+                        WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                        AND rowid NOT IN (
+                            SELECT rowid FROM (
+                                SELECT rowid,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY ArticlePC
+                                        ORDER BY
+                                            CASE WHEN Vendor IS NOT NULL AND TRIM(Vendor) != '' THEN 0 ELSE 1 END ASC,
+                                            updated_at DESC
+                                    ) AS rn
+                                FROM Total_Price
+                                WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                            ) t WHERE rn = 1
+                        )
+                    """))
+                else:
+                    result = session.execute(text("""
+                        WITH CTE AS (
+                            SELECT *,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY ArticlePC
+                                    ORDER BY
+                                        CASE WHEN Vendor IS NOT NULL AND LTRIM(RTRIM(Vendor)) != '' THEN 0 ELSE 1 END ASC,
+                                        updated_at DESC
+                                ) AS rn
+                            FROM Total_Price
+                            WHERE ArticlePC IS NOT NULL AND ArticlePC != ''
+                        )
+                        DELETE FROM CTE WHERE rn > 1
+                    """))
+                session.commit()
+                deleted = result.rowcount
+                logger.info(f"[DUPLICATES] Удалено {deleted} дублей по ArticlePC из Total_Price")
+                return deleted, deleted_items
+        except Exception as e:
+            logger.error(f"[DUPLICATES] Ошибка удаления дублей по ArticlePC: {e}", exc_info=True)
             raise
 
     # ========== Total_Labor ==========
