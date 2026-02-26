@@ -50,9 +50,16 @@ class ErpSyncService:
                     logger.warning(f"  ... и ещё {len(duplicate_codes) - 10}")
 
             # 3. Загружаем маппинг синонимов для VendorForFilter
+            # Ключи нормализуем в uppercase — иначе vendor_norm (всегда upper) не найдёт
+            # синоним с raw-ключом типа 'Овен' или 'КМ-профиль'
             synonyms_map = {}
             if hasattr(self.repository, 'get_synonyms_cached'):
-                synonyms_map = self.repository.get_synonyms_cached()
+                raw_synonyms = self.repository.get_synonyms_cached()
+                synonyms_map = {
+                    DataNormalizer.normalize_vendor_name(k): v
+                    for k, v in raw_synonyms.items()
+                }
+                logger.debug(f"[FIX] synonyms_map загружен: {len(synonyms_map)} записей (ключи нормализованы)")
 
             # 4. Загружаем существующие данные из БД для быстрого поиска
             logger.debug("Загрузка существующих ArticlePC из БД...")
@@ -82,14 +89,18 @@ class ErpSyncService:
                 if key not in pair_to_db_vendors:
                     pair_to_db_vendors[key] = set()
                 pair_to_db_vendors[key].add((vendor_raw, part_num_raw, article_pc_upper))
-                # Ключ по canonical имени синонима
+                # Ключ по canonical имени синонима (нормализованный)
+                # Нужен для случаев когда ERP шлёт vendor под именем VendorForFilter,
+                # а в БД хранится под другим именем (напр. 'IKEM' в БД, 'IEK' в 1C)
                 if vendor_norm in synonyms_map:
-                    canonical = synonyms_map[vendor_norm]
-                    canon_key = (canonical, part_num_norm)
-                    if canon_key not in pair_to_db_vendors:
-                        pair_to_db_vendors[canon_key] = set()
-                        synonyms_resolved += 1
-                    pair_to_db_vendors[canon_key].add((vendor_raw, part_num_raw, article_pc_upper))
+                    canonical_raw = synonyms_map[vendor_norm]
+                    canonical_norm = DataNormalizer.normalize_vendor_name(canonical_raw)
+                    if canonical_norm != vendor_norm:  # Добавляем только если canonical реально отличается
+                        canon_key = (canonical_norm, part_num_norm)
+                        if canon_key not in pair_to_db_vendors:
+                            pair_to_db_vendors[canon_key] = set()
+                            synonyms_resolved += 1
+                        pair_to_db_vendors[canon_key].add((vendor_raw, part_num_raw, article_pc_upper))
             if synonyms_resolved:
                 logger.info(
                     f"[ERP] Lookup с синонимами: {len(pair_to_db_vendors)} ключей "
@@ -148,6 +159,24 @@ class ErpSyncService:
                                     'article_pc': code,
                                     'descr': name,
                                 })
+                        # Дополнительная проверка: есть ли строки с тем же нормализованным
+                        # vendor+Part_Num, но без ArticlePC (дубль с другим регистром вендора)?
+                        # Например: 'Овен/107381/УП-00515903' уже в БД,
+                        # но 'ОВЕН/107381/' (прайс-файл) остался незалинкованным.
+                        norm_key = (manufacturer, article)
+                        if norm_key in pair_to_db_vendors:
+                            for dup_vendor, dup_part_num, dup_apc in pair_to_db_vendors[norm_key]:
+                                if not dup_apc:  # Строка без ArticlePC — нужно привязать
+                                    to_update_article_pc.append({
+                                        'vendor': dup_vendor,
+                                        'part_num': dup_part_num,
+                                        'article_pc': code,
+                                    })
+                                    logger.info(
+                                        f"[FIX] Привязка дубля к прайс-файловой строке: "
+                                        f"vendor={dup_vendor!r} part_num={dup_part_num!r} "
+                                        f"article_pc={code!r}"
+                                    )
                         result.skipped_existing += 1
                         continue
 

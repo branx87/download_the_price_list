@@ -522,16 +522,20 @@ class SqlRepository(IRepository):
         ]
 
         # Шаг 2: Pre-check — какие записи уже есть в БД (отдельная транзакция, NOLOCK)
+        # Используем нормализованный vendor для поиска — защита от расхождений регистра
+        # (напр. '1C шлёт 'Овен', а в БД хранится 'ОВЕН')
         vendors_in_batch = set(i['vendor'] for i in items_prepared)
-        existing_in_db = set()
+        # norm_vendor → set of part_nums
+        existing_in_db: dict = {}  # (norm_vendor, part_num) → True
 
         with self.SessionLocal() as session:
             for vendor in vendors_in_batch:
+                vendor_norm = DataNormalizer.normalize_vendor_name(vendor)
                 parts_for_vendor = [i['part_num'] for i in items_prepared if i['vendor'] == vendor]
                 for j in range(0, len(parts_for_vendor), 500):
                     batch_parts = parts_for_vendor[j:j + 500]
                     placeholders = ', '.join([f':p{k}' for k in range(len(batch_parts))])
-                    params = {'vendor': vendor}
+                    params = {'vendor': vendor_norm}
                     params.update({f'p{k}': p for k, p in enumerate(batch_parts)})
 
                     result = session.execute(text(f"""
@@ -539,15 +543,21 @@ class SqlRepository(IRepository):
                         WHERE Vendor = :vendor AND Part_Num IN ({placeholders})
                     """), params)
                     for row in result:
-                        existing_in_db.add((vendor, row[0]))
+                        existing_in_db[(vendor_norm, row[0])] = True
 
         # Шаг 3: Разделяем — новые vs уже существующие
+        # Для UPDATE используем нормализованный vendor — гарантируем что JOIN найдёт строку
+        # даже при расхождении регистра между 1C и прайс-файлом
         to_insert = []
         to_update_pc = []
         for item in items_prepared:
-            key = (item['vendor'], item['part_num'])
+            vendor_norm = DataNormalizer.normalize_vendor_name(item['vendor'])
+            key = (vendor_norm, item['part_num'])
             if key in existing_in_db:
-                to_update_pc.append(item)
+                # Нормализуем vendor для SQL UPDATE: чтобы JOIN сработал даже при case-sensitive collation
+                item_for_update = dict(item)
+                item_for_update['vendor'] = vendor_norm
+                to_update_pc.append(item_for_update)
             else:
                 to_insert.append(item)
 
