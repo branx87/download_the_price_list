@@ -9,10 +9,22 @@ sys.path.insert(0, str(project_root))
 
 from bot.main import main
 
+log_dir = project_root / 'logs'
+log_dir.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_dir / 'sync.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout),
+    ]
 )
+
+# Подавляем шумные HTTP-логи telegram/httpx
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
 
 if __name__ == '__main__':
     print("=" * 60)

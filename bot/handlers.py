@@ -258,13 +258,12 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if result.returncode == 0:
                 output = stdout + stderr
-                
-                # # Добавь логирование полного вывода для DKC
-                # if vendor == 'DKC':
-                #     logger.info(f"DKC stdout: {result.stdout}")
-                #     logger.error(f"DKC stderr: {result.stderr}")
-                
+
                 total, new, updated, price_changes, disappeared = parse_sync_output(output, vendor)
+                logger.info(
+                    f"[SYNC] {vendor}: total={total}, new={new}, updated={updated}, "
+                    f"price_changes={price_changes}, disappeared={disappeared}"
+                )
 
                 sync_status['last_results'][vendor] = {
                     'success': True,
@@ -506,6 +505,12 @@ async def _run_erp_sync(chat_id: int, message_id: int, context: ContextTypes.DEF
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, service.sync_from_erp)
+
+        logger.info(
+            f"[ERP] Синхронизация завершена: received={result.total_received}, "
+            f"added={result.added}, linked={result.updated}, skipped={result.skipped_existing}, "
+            f"duplicates={result.skipped_duplicates}, errors={result.errors}"
+        )
 
         # Формируем отчет
         report_lines = ["📊 Результат загрузки из 1C-ERP:"]
@@ -825,18 +830,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sync_status['last_stderr'] = stderr
             sync_status['last_returncode'] = result.returncode
             
-            # Логируем для отладки
-            if vendor == 'DKC':
-                logger.info(f"DKC stdout length: {len(stdout)}")
-                logger.info(f"DKC stderr length: {len(stderr)}")
-                logger.info(f"DKC returncode: {result.returncode}")
-                logger.error(f"DKC STDERR CONTENT:\n{stderr}")
-                logger.error(f"DKC STDOUT LAST 2000 chars:\n{stdout[-2000:]}")  # ← ДОБАВЬ ЭТО
-            
             if result.returncode == 0:
                 output = stdout + stderr
-                
+
                 total, new, updated, price_changes, disappeared = parse_sync_output(output, vendor)
+                logger.info(
+                    f"[SYNC] {vendor}: total={total}, new={new}, updated={updated}, "
+                    f"price_changes={price_changes}, disappeared={disappeared}"
+                )
 
                 sync_status['last_results'][vendor] = {
                     'success': True,
