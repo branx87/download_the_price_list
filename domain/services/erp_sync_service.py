@@ -234,7 +234,7 @@ class ErpSyncService:
                         result.updated += 1
                         result.linked_details.append({
                             'vendor': sorted(db_vendor_names)[0],
-                            'part_num': article,
+                            'part_num': article_raw,
                             'article_pc': code_raw,
                             'name': name
                         })
@@ -259,8 +259,8 @@ class ErpSyncService:
                     pair_to_db_vendors[(manufacturer, article)] = {(manufacturer_raw, article_raw, code_upper)}  # предотвращаем дубли в батче
                     result.added += 1
                     result.added_details.append({
-                        'vendor': manufacturer,
-                        'part_num': article,
+                        'vendor': manufacturer_raw,
+                        'part_num': article_raw,
                         'article_pc': code_raw,
                         'name': name
                     })
