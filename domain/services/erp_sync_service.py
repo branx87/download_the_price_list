@@ -81,7 +81,7 @@ class ErpSyncService:
             # article_pc_upper — уже привязанный ArticlePC (или '' если не привязан)
             pair_to_db_vendors: dict = {}
             synonyms_resolved = 0
-            for vendor_raw, part_num_raw, article_pc_upper in existing_pairs:
+            for vendor_raw, part_num_raw, article_pc_upper, _apc_raw in existing_pairs:
                 vendor_norm = DataNormalizer.normalize_vendor_name(vendor_raw)
                 part_num_norm = DataNormalizer.normalize_article(part_num_raw)
                 # Прямой ключ
@@ -107,11 +107,12 @@ class ErpSyncService:
                     f"(+{synonyms_resolved} через синонимы из {len(existing_pairs)} пар в БД)"
                 )
 
-            # Lookup article_pc → (vendor_raw, part_num_raw) для обновления raw значений
+            # Lookup article_pc_upper → (vendor_raw, part_num_raw, article_pc_raw)
+            # article_pc_raw — реально хранимое значение в БД (WHERE ключ для UPDATE)
             article_pc_to_db_row = {
-                apc: (v, p)
-                for v, p, apc in existing_pairs
-                if apc
+                apc_upper: (v, p, apc_raw)
+                for v, p, apc_upper, apc_raw in existing_pairs
+                if apc_upper
             }
 
             # 4. Классифицируем позиции
@@ -123,7 +124,7 @@ class ErpSyncService:
             for idx, item in enumerate(unique_items):
                 try:
                     code_raw = (item.get('code') or '').strip()
-                    code = code_raw.upper()  # Нормализуем для сравнения с БД
+                    code_upper = code_raw.upper()  # Только для сравнения/поиска — не для хранения
                     manufacturer_raw = (item.get('manufacturer') or '').strip()
                     manufacturer = DataNormalizer.normalize_vendor_name(manufacturer_raw)
                     article_raw = (item.get('article') or '').strip()
@@ -135,30 +136,39 @@ class ErpSyncService:
                         logger.debug(f"[ERP] Нормализация производителя: '{manufacturer_raw}' -> '{manufacturer}'")
                     if article_raw != article:
                         logger.debug(f"[ERP] Нормализация артикула: '{article_raw}' -> '{article}'")
-                    if code_raw != code:
-                        logger.debug(f"[ERP] Нормализация кода: '{code_raw}' -> '{code}'")
+                    if code_raw != code_upper:
+                        logger.debug(f"[ERP] Нормализация кода (только для поиска): '{code_raw}' -> '{code_upper}'")
 
-                    if not code or not manufacturer or not article:
-                        logger.debug(f"Пропуск позиции без обязательных полей: code={code}, "
+                    if not code_raw or not manufacturer or not article:
+                        logger.debug(f"Пропуск позиции без обязательных полей: code={code_raw}, "
                                     f"manufacturer={manufacturer}, article={article}")
                         result.errors += 1
                         result.error_details.append(
-                            f"Пустые обязательные поля: code={code}, manufacturer={manufacturer}, article={article}"
+                            f"Пустые обязательные поля: code={code_raw}, manufacturer={manufacturer}, article={article}"
                         )
                         continue
 
                     # Шаг 1: ArticlePC уже есть в БД → пропускаем, но обновляем raw значения
-                    if code in existing_article_pcs:
-                        db_row = article_pc_to_db_row.get(code)
+                    if code_upper in existing_article_pcs:
+                        db_row = article_pc_to_db_row.get(code_upper)
                         if db_row:
-                            db_vendor, db_part_num = db_row
-                            if db_vendor != manufacturer_raw or db_part_num != article_raw:
-                                to_update_raw_values.append({
+                            db_vendor, db_part_num, stored_article_pc = db_row
+                            needs_vendor_update = db_vendor != manufacturer_raw or db_part_num != article_raw
+                            needs_case_fix = stored_article_pc != code_raw
+                            if needs_vendor_update or needs_case_fix:
+                                update_item = {
                                     'vendor': manufacturer_raw,
                                     'part_num': article_raw,
-                                    'article_pc': code,
+                                    'article_pc': stored_article_pc,  # WHERE ключ = реально хранимое
                                     'descr': name,
-                                })
+                                }
+                                if needs_case_fix:
+                                    update_item['new_article_pc'] = code_raw
+                                    logger.debug(
+                                        f"[FIX] Исправление регистра ArticlePC: "
+                                        f"'{stored_article_pc}' -> '{code_raw}'"
+                                    )
+                                to_update_raw_values.append(update_item)
                         # Дополнительная проверка: есть ли строки с тем же нормализованным
                         # vendor+Part_Num, но без ArticlePC (дубль с другим регистром вендора)?
                         # Например: 'Овен/107381/УП-00515903' уже в БД,
@@ -170,12 +180,12 @@ class ErpSyncService:
                                     to_update_article_pc.append({
                                         'vendor': dup_vendor,
                                         'part_num': dup_part_num,
-                                        'article_pc': code,
+                                        'article_pc': code_raw,
                                     })
                                     logger.info(
                                         f"[FIX] Привязка дубля к прайс-файловой строке: "
                                         f"vendor={dup_vendor!r} part_num={dup_part_num!r} "
-                                        f"article_pc={code!r}"
+                                        f"article_pc={code_raw!r}"
                                     )
                         result.skipped_existing += 1
                         continue
@@ -194,12 +204,12 @@ class ErpSyncService:
                         if existing_apcs:
                             # Строки уже привязаны. Добавляем ВСЕ коды (и текущий, и старые)
                             # в existing_article_pcs чтобы оба считались "обработанными"
-                            existing_article_pcs.add(code)
+                            existing_article_pcs.add(code_upper)
                             existing_article_pcs.update(existing_apcs)
                             result.skipped_existing += 1
-                            if code not in existing_apcs:
+                            if code_upper not in existing_apcs:
                                 logger.debug(
-                                    f"[ERP] Пропуск {code!r}: пара уже имеет ArticlePC={sorted(existing_apcs)}"
+                                    f"[ERP] Пропуск {code_raw!r}: пара уже имеет ArticlePC={sorted(existing_apcs)}"
                                 )
                             continue
 
@@ -213,48 +223,48 @@ class ErpSyncService:
                             # нашёл запись — даже если Part_Num содержит внутренние пробелы ('ШМТ осн 80х8')
                             logger.debug(
                                 f"[ERP] to_update: vendor={orig_vendor!r} part_num={orig_part_num!r} "
-                                f"article_pc={code!r}"
+                                f"article_pc={code_raw!r}"
                             )
                             to_update_article_pc.append({
                                 'vendor': orig_vendor,
                                 'part_num': orig_part_num,
-                                'article_pc': code
+                                'article_pc': code_raw
                             })
-                        existing_article_pcs.add(code)
+                        existing_article_pcs.add(code_upper)
                         result.updated += 1
                         result.linked_details.append({
                             'vendor': sorted(db_vendor_names)[0],
                             'part_num': article,
-                            'article_pc': code,
+                            'article_pc': code_raw,
                             'name': name
                         })
-                        logger.debug(f"[ERP] Привязка ArticlePC: {sorted(db_vendor_names)} | {article} -> код {code}")
+                        logger.debug(f"[ERP] Привязка ArticlePC: {sorted(db_vendor_names)} | {article} -> код {code_raw!r}")
                         continue
 
                     # Шаг 3: Нигде не найден → INSERT
                     # Сохраняем ОРИГИНАЛЬНЫЕ значения как есть (нормализация только для поиска)
                     logger.debug(
                         f"[FIX] INSERT: vendor={manufacturer_raw!r} part_num={article_raw!r} "
-                        f"(norm: vendor={manufacturer!r} article={article!r}) article_pc={code!r}"
+                        f"(norm: vendor={manufacturer!r} article={article!r}) article_pc={code_raw!r}"
                     )
                     to_insert.append({
                         'vendor': manufacturer_raw,
                         'part_num': article_raw,
                         'descr': name,
                         'units': unit,
-                        'article_pc': code,
+                        'article_pc': code_raw,
                         'vendor_for_filter': synonyms_map.get(manufacturer, '1C-ERP')
                     })
-                    existing_article_pcs.add(code)
-                    pair_to_db_vendors[(manufacturer, article)] = {(manufacturer_raw, article_raw, code)}  # предотвращаем дубли в батче
+                    existing_article_pcs.add(code_upper)
+                    pair_to_db_vendors[(manufacturer, article)] = {(manufacturer_raw, article_raw, code_upper)}  # предотвращаем дубли в батче
                     result.added += 1
                     result.added_details.append({
                         'vendor': manufacturer,
                         'part_num': article,
-                        'article_pc': code,
+                        'article_pc': code_raw,
                         'name': name
                     })
-                    logger.debug(f"[ERP] Новая позиция: {manufacturer} | {article} | {name} | код {code}")
+                    logger.debug(f"[ERP] Новая позиция: {manufacturer} | {article} | {name} | код {code_raw!r}")
 
                 except Exception as e:
                     result.errors += 1

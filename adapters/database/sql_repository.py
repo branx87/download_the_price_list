@@ -825,9 +825,10 @@ class SqlRepository(IRepository):
         """
         Получить все существующие пары Vendor+Part_Num+ArticlePC из БД — БЕЗ нормализации.
 
-        Возвращает кортежи (vendor_raw, part_num_raw, article_pc_upper) где:
+        Возвращает кортежи (vendor_raw, part_num_raw, article_pc_upper, article_pc_raw) где:
         - vendor_raw, part_num_raw — оригинальные значения из БД (для UPDATE)
         - article_pc_upper — .strip().upper() от ArticlePC (для сравнения с 1C кодом)
+        - article_pc_raw — .strip() от ArticlePC (реально хранимое значение, для WHERE в UPDATE)
         """
         with self.SessionLocal() as session:
             query = text(f"""
@@ -836,26 +837,31 @@ class SqlRepository(IRepository):
             """)
             result = session.execute(query)
             return [
-                (row[0] or '', row[1] or '', (row[2] or '').strip().upper())
+                (row[0] or '', row[1] or '', (row[2] or '').strip().upper(), (row[2] or '').strip())
                 for row in result
             ]
 
     def bulk_update_raw_values(self, items: list) -> int:
         """
-        Обновляет Vendor, Part_Num и (опционально) Descr до оригинальных значений из 1C.
-        Поиск по ArticlePC — уникальному идентификатору.
-        items: list of {vendor, part_num, article_pc, descr?}
+        Обновляет Vendor, Part_Num, (опционально) Descr и (опционально) ArticlePC до оригинальных значений из 1C.
+        Поиск по ArticlePC (WHERE) — уникальному идентификатору.
+
+        items: list of {vendor, part_num, article_pc, descr?, new_article_pc?}
+        - article_pc     — WHERE ключ (реально хранимое значение в БД, может быть в неверном регистре)
+        - new_article_pc — новое значение ArticlePC (если задан, обновит колонку; иначе не меняется)
         """
         if not items:
             return 0
 
         has_descr = any('descr' in item for item in items)
+        has_new_apc = any('new_article_pc' in item for item in items)
         current_time = datetime.now()
         all_data = [
             {
                 'vendor': self._safe_str(item['vendor']),
                 'part_num': self._safe_str(item['part_num']),
                 'article_pc': self._safe_str(item['article_pc']),
+                'new_article_pc': self._safe_str(item.get('new_article_pc', item['article_pc'])),
                 'descr': self._safe_str(item.get('descr', '')),
                 'updated_at': current_time
             }
@@ -869,6 +875,7 @@ class SqlRepository(IRepository):
                     connection.execute(text("""
                         CREATE TABLE #tmp_raw_upd (
                             ArticlePC NVARCHAR(255),
+                            NewArticlePC NVARCHAR(255),
                             Vendor NVARCHAR(255),
                             Part_Num NVARCHAR(255),
                             Descr NVARCHAR(512),
@@ -877,10 +884,12 @@ class SqlRepository(IRepository):
                     """))
                     for i in range(0, len(all_data), 1000):
                         connection.execute(text("""
-                            INSERT INTO #tmp_raw_upd (ArticlePC, Vendor, Part_Num, Descr, updated_at)
-                            VALUES (:article_pc, :vendor, :part_num, :descr, :updated_at)
+                            INSERT INTO #tmp_raw_upd (ArticlePC, NewArticlePC, Vendor, Part_Num, Descr, updated_at)
+                            VALUES (:article_pc, :new_article_pc, :vendor, :part_num, :descr, :updated_at)
                         """), all_data[i:i + 1000])
                     set_clause = "tp.Vendor = t.Vendor, tp.Part_Num = t.Part_Num, tp.updated_at = t.updated_at"
+                    if has_new_apc:
+                        set_clause = "tp.ArticlePC = t.NewArticlePC, " + set_clause
                     if has_descr:
                         set_clause += ", tp.Descr = t.Descr"
                     result = connection.execute(text(f"""
@@ -898,6 +907,8 @@ class SqlRepository(IRepository):
                     raise
         else:
             set_clause = "Vendor = :vendor, Part_Num = :part_num, updated_at = :updated_at"
+            if has_new_apc:
+                set_clause = "ArticlePC = :new_article_pc, " + set_clause
             if has_descr:
                 set_clause += ", Descr = :descr"
             query = text(f"""
@@ -918,8 +929,8 @@ class SqlRepository(IRepository):
                     session.rollback()
                     raise
 
-        fields_updated = "vendor/part_num" + ("/descr" if has_descr else "")
-        logger.info(f"[FIX] bulk_update_raw_values: {affected}/{len(items)} {fields_updated} обновлено до raw значений из 1C")
+        fields_updated = "vendor/part_num" + ("/article_pc" if has_new_apc else "") + ("/descr" if has_descr else "")
+        logger.info(f"[FIX] bulk_update_raw_values: {affected}/{len(items)} [{fields_updated}] обновлено до raw значений из 1C")
         return affected
 
     def reset_changed_status(self, vendor: str) -> int:
