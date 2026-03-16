@@ -126,6 +126,19 @@ def main():
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_callback))
 
+    # Глобальный обработчик ошибок — чтобы TimedOut и BadRequest не флудили в лог
+    async def error_handler(update: object, context) -> None:
+        from telegram.error import TimedOut, NetworkError, BadRequest as TgBadRequest
+        err = context.error
+        if isinstance(err, (TimedOut, NetworkError)):
+            logger.warning("[network] %s", err)
+        elif isinstance(err, TgBadRequest) and "too old" in str(err).lower():
+            logger.debug("[old_callback] %s", err)
+        else:
+            logger.error("[error] %s", err, exc_info=err)
+
+    app.add_error_handler(error_handler)
+
     print("\nПодключаемся к Telegram... (может занять до минуты при медленной сети)")
 
     # post_init вызывается после успешной инициализации — выводим статус здесь

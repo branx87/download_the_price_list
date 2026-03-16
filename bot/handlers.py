@@ -560,7 +560,12 @@ async def _run_erp_sync(chat_id: int, message_id: int, context: ContextTypes.DEF
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопок"""
     query = update.callback_query
-    await query.answer()
+    from telegram.error import BadRequest as TgBadRequest
+    try:
+        await query.answer()
+    except TgBadRequest:
+        # Колбэк устарел (бот был перезапущен) — просто игнорируем
+        return
 
     if query.data == 'labor_noop':
         return
