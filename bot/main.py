@@ -1,4 +1,5 @@
 import logging
+from telegram import Bot
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 import os
 import sys
@@ -34,6 +35,22 @@ from bot.handlers import (
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+# Патч для бага в python-telegram-bot 22.x:
+# Bot.initialize() устанавливает _initialized=True ДО вызова get_me().
+# Если get_me() падает с TimedOut, при повторной попытке initialize() видит
+# _initialized=True и пропускает get_me() — бот остаётся без _bot_user.
+_orig_bot_initialize = Bot.initialize
+
+
+async def _patched_bot_initialize(self: Bot) -> None:
+    if self._initialized and self._bot_user is None:
+        logger.warning("[FIX] Bot._initialized=True но _bot_user=None — сбрасываем флаг для повторного get_me()")
+        self._initialized = False
+    await _orig_bot_initialize(self)
+
+
+Bot.initialize = _patched_bot_initialize
+
 
 def main():
     """Запуск Telegram бота"""
@@ -51,23 +68,37 @@ def main():
         return
 
     # Создаем приложение с увеличенными таймаутами и поддержкой прокси
-    builder = Application.builder().token(BOT_TOKEN)
-
-    # Настройка таймаутов
     from telegram.request import HTTPXRequest
+
+    proxy_url = os.getenv('PROXY_URL', '') or None
+
+    # Оба запроса нужно настроить явно — иначе get_updates_request получит
+    # дефолтные 5-секундные таймауты, что вызывает TimedOut при медленной сети.
     request = HTTPXRequest(
         connection_pool_size=8,
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0,
-        pool_timeout=30.0
+        connect_timeout=60.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        pool_timeout=60.0,
+        proxy=proxy_url,
     )
-    builder.request(request)
+    get_updates_request = HTTPXRequest(
+        connection_pool_size=1,
+        connect_timeout=60.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        pool_timeout=60.0,
+        proxy=proxy_url,
+    )
 
-    # Если есть прокси в .env, используем его
-    proxy_url = os.getenv('PROXY_URL', '')
+    builder = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .get_updates_request(get_updates_request)
+    )
+
     if proxy_url:
-        builder.proxy_url(proxy_url)
         print(f"🔄 Используется прокси: {proxy_url}")
 
     app = builder.build()
@@ -95,15 +126,24 @@ def main():
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    logger.info("🤖 Telegram бот запущен!")
-    print("\n" + "="*60)
-    print("🤖 TELEGRAM БОТ ЗАПУЩЕН")
-    print("="*60)
-    print("\n📱 Открой своего бота в Telegram и отправь /start")
-    print("\n⌨️ Нажми Ctrl+C для остановки\n")
+    print("\nПодключаемся к Telegram... (может занять до минуты при медленной сети)")
 
-    # Запускаем polling
-    app.run_polling(allowed_updates=['message', 'callback_query'])
+    # post_init вызывается после успешной инициализации — выводим статус здесь
+    async def on_ready(app: Application) -> None:
+        logger.info("🤖 Telegram бот запущен! username=%s", app.bot.username)
+        print("\n" + "="*60)
+        print(f"🤖 TELEGRAM БОТ ЗАПУЩЕН (@{app.bot.username})")
+        print("="*60)
+        print("\n📱 Открой своего бота в Telegram и отправь /start")
+        print("\n⌨️ Нажми Ctrl+C для остановки\n")
+
+    app.post_init = on_ready
+
+    # Запускаем polling с бесконечными повторами при сбоях сети
+    app.run_polling(
+        allowed_updates=['message', 'callback_query'],
+        bootstrap_retries=-1,
+    )
 
 
 if __name__ == '__main__':
