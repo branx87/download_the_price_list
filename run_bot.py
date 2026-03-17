@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Запуск Telegram бота"""
+import asyncio
 import sys
 import logging
 from pathlib import Path
 
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
-
-from bot.main import main
 
 log_dir = project_root / 'logs'
 log_dir.mkdir(exist_ok=True)
@@ -21,14 +20,19 @@ logging.basicConfig(
     ]
 )
 
-# Подавляем шумные HTTP-логи telegram/httpx
+# Подавляем шумные HTTP-логи
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
+
+from bot.main import main
 
 if __name__ == '__main__':
     print("=" * 60)
     print("  TELEGRAM БОТ СИНХРОНИЗАЦИИ ПРАЙСОВ")
     print("=" * 60)
     print()
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Бот остановлен")
