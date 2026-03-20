@@ -129,6 +129,17 @@ class ErpSyncService:
                     manufacturer = DataNormalizer.normalize_vendor_name(manufacturer_raw)
                     article_raw = (item.get('article') or '').strip()
                     article = DataNormalizer.normalize_article(article_raw)
+
+                    # Разрешаем производителя через таблицу синонимов (напр.: КЭАЗ → KEAZ).
+                    # synonyms_map содержит нормализованные ключи, поэтому ищем по manufacturer.
+                    canonical_raw = synonyms_map.get(manufacturer)
+                    if canonical_raw:
+                        canonical_norm = DataNormalizer.normalize_vendor_name(canonical_raw)
+                        logger.debug(
+                            f"[ERP] Синоним производителя: '{manufacturer_raw}' -> '{canonical_raw}'"
+                        )
+                        manufacturer_raw = canonical_raw
+                        manufacturer = canonical_norm
                     name = (item.get('name') or '').strip()
                     unit = (item.get('unit') or 'шт').strip()
 
