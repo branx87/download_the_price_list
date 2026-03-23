@@ -155,6 +155,15 @@ class SyncService:
                 except Exception as e:
                     logger.warning(f"⚠️ Не удалось создать отчет: {e}")
 
+            # 9. Автоматически заполняем VendorForFilter для новых/обновлённых записей
+            try:
+                if hasattr(self.repository, 'backfill_vendor_for_filter'):
+                    vff_count = self.repository.backfill_vendor_for_filter(synonyms_map)
+                    if vff_count:
+                        logger.info(f"🏷 VendorForFilter заполнен для {vff_count} записей")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка backfill VendorForFilter: {e}")
+
             result.success = True
             logger.info(f"✅ Синхронизация {vendor} завершена успешно")
 

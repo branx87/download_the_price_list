@@ -1,0 +1,12 @@
+services:
+  price-sync-bot:
+    build: .
+    container_name: price-sync-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+      - ./price_files:/app/price_files
+    environment:
+      - TZ=Europe/Moscow

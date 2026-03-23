@@ -10,9 +10,10 @@ from telegram.error import NetworkError, TimedOut, Conflict
 from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 
-# Настройка кодировки для Windows
-if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8')
+from config.logging_config import setup_logging
+from config.settings import settings
+
+setup_logging(settings.LOG_DIR)
 
 # Импортируем обработчики
 from bot.handlers import (
@@ -36,6 +37,7 @@ from bot.handlers import (
     labor_edit_command,
     button_callback
 )
+from bot.scheduler import register_jobs
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -64,7 +66,6 @@ def _check_and_write_pid() -> None:
     """Проверяем нет ли уже запущенного экземпляра. Пишем PID текущего процесса."""
     if _PID_FILE.exists():
         old_pid = _PID_FILE.read_text().strip()
-        # Проверяем жив ли процесс
         try:
             import psutil
             if psutil.pid_exists(int(old_pid)):
@@ -72,7 +73,6 @@ def _check_and_write_pid() -> None:
                 print("Закрой предыдущий экземпляр и попробуй снова.\n")
                 sys.exit(1)
         except ImportError:
-            # psutil не установлен — просто предупреждаем
             logger.warning("Найден старый PID-файл (%s). Убедись что бот не запущен дважды.", old_pid)
 
     _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -162,13 +162,16 @@ async def main() -> None:
         app.add_handler(CallbackQueryHandler(button_callback))
         app.add_error_handler(error_handler)
 
+        # Регистрируем периодические задачи
+        register_jobs(app)
+
         print("\nПодключаемся к Telegram...")
 
         await app.initialize()
         await app.start()
 
         bot_info = await app.bot.get_me()
-        logger.info("🤖 Telegram бот запущен! username=%s", bot_info.username)
+        logger.info("Telegram бот запущен! username=%s", bot_info.username)
         print("\n" + "=" * 60)
         print(f"🤖 TELEGRAM БОТ ЗАПУЩЕН (@{bot_info.username})")
         print("=" * 60)
@@ -177,7 +180,7 @@ async def main() -> None:
 
         await app.updater.start_polling(
             allowed_updates=['message', 'callback_query'],
-            drop_pending_updates=True,  # сбрасываем накопившиеся обновления при старте
+            drop_pending_updates=True,
             bootstrap_retries=5,
         )
 
@@ -200,3 +203,9 @@ async def main() -> None:
         except Exception as e:
             logger.error("Ошибка при остановке: %s", e)
         logger.info("Бот остановлен.")
+
+
+if __name__ == '__main__':
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(main())

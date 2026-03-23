@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import time
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -28,6 +29,7 @@ class Settings:
             f"PWD={self.MSSQL_PASSWORD};TrustServerCertificate={trust}"
         )
         return f"mssql+pyodbc:///?odbc_connect={params}"
+
     BOT_TOKEN = os.getenv('BOT_TOKEN', '')
     DKC_LOGIN = os.getenv('DKC_LOGIN', 'branx')
     DKC_PASSWORD = os.getenv('DKC_PASSWORD', '11051987')
@@ -45,20 +47,60 @@ class Settings:
     ONE_C_PASSWORD = os.getenv('ONE_C_PASSWORD', '')
     ERP_BASE_URL = os.getenv('ERP_BASE_URL', '')
 
+    # Доступ: список Telegram user ID через запятую
+    @property
+    def ADMIN_IDS(self) -> set[int]:
+        raw = os.getenv('ADMIN_IDS', '')
+        if not raw:
+            return set()
+        return {int(x.strip()) for x in raw.split(',') if x.strip().isdigit()}
+
+    # --- Планировщик ---
+    # Chat ID для уведомлений (узнать: отправь /start боту, посмотри в логах)
+    NOTIFY_CHAT_ID = int(os.getenv('NOTIFY_CHAT_ID', '0')) or None
+
+    # ERP: расписание (часы через запятую, например "8,13,18")
+    @property
+    def ERP_SYNC_TIMES(self) -> list[time]:
+        raw = os.getenv('ERP_SYNC_TIMES', '')
+        if not raw:
+            return []
+        times = []
+        for part in raw.split(','):
+            part = part.strip()
+            if ':' in part:
+                h, m = part.split(':')
+                times.append(time(int(h), int(m)))
+            elif part.isdigit():
+                times.append(time(int(part), 0))
+        return times
+
+    # Sync all: день недели (0=пн, 6=вс) и время
+    SYNC_ALL_DAY = int(os.getenv('SYNC_ALL_DAY', '0'))  # понедельник
+
+    @property
+    def SYNC_ALL_TIME(self) -> time | None:
+        raw = os.getenv('SYNC_ALL_TIME', '')
+        if not raw:
+            return None
+        if ':' in raw:
+            h, m = raw.split(':')
+            return time(int(h), int(m))
+        if raw.isdigit():
+            return time(int(raw), 0)
+        return None
+
     # Путь к Python из виртуального окружения
     @property
     def PYTHON_PATH(self):
         """Возвращает путь к Python интерпретатору"""
-        # Если запущен из venv, используем текущий интерпретатор
         if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
             return sys.executable
 
-        # Иначе пробуем найти venv в PROJECT_ROOT
         venv_python = self.PROJECT_ROOT / "venv" / "Scripts" / "python.exe"
         if venv_python.exists():
             return str(venv_python)
 
-        # Fallback на системный python
         return 'python'
 
     def __init__(self):

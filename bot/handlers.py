@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -14,11 +15,26 @@ from domain.services.sync_service import SyncService
 from domain.services.report_service import ReportService
 from adapters.erp.erp_client import ErpClient
 from domain.services.erp_sync_service import ErpSyncService
-from domain.services.report_service import ReportService
-
 
 
 logger = logging.getLogger(__name__)
+
+
+def admin_only(func):
+    """Декоратор: допускает только пользователей из ADMIN_IDS."""
+    @functools.wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        admin_ids = settings.ADMIN_IDS
+        if admin_ids and update.effective_user.id not in admin_ids:
+            logger.warning(
+                "Отказ в доступе: user_id=%s username=%s",
+                update.effective_user.id,
+                update.effective_user.username,
+            )
+            await update.message.reply_text("⛔ Доступ запрещён.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
 
 # Хранилище последнего ErpSyncResult для генерации отчёта по кнопке
 _last_erp_result = {
@@ -62,8 +78,11 @@ def create_sync_service(vendor: str) -> SyncService:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     user = update.effective_user
+    chat_id = update.effective_chat.id
+    logger.info(f"[START] user={user.first_name} chat_id={chat_id}")
 
     text = f"""🤖 Привет, {user.first_name}!
+📌 Chat ID: {chat_id}
 
 Команды:
 
@@ -87,6 +106,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+@admin_only
 async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /sync"""
     vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
@@ -97,6 +117,7 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📋 Выберите вендора для синхронизации:", reply_markup=reply_markup)
 
 
+@admin_only
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /check - проверка актуальности прайсов"""
     vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
@@ -107,6 +128,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📋 Выберите вендора для проверки:", reply_markup=reply_markup)
 
 
+@admin_only
 async def check_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /check_all - проверка актуальности всех прайсов"""
     vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
@@ -144,6 +166,7 @@ async def check_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(summary)
 
 
+@admin_only
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать последние ошибки"""
     debug_info = []
@@ -217,6 +240,7 @@ def parse_sync_output(output: str, vendor: str):
     return total, new, updated, price_changes, disappeared
 
 
+@admin_only
 async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /sync_all"""
     if sync_status['is_running']:
@@ -324,6 +348,7 @@ async def sync_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sync_status['current_vendor'] = None
 
 
+@admin_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /status"""
     if not sync_status['last_results']:
@@ -346,6 +371,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+@admin_only
 async def vendors_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /vendors"""
     vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
@@ -353,6 +379,7 @@ async def vendors_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+@admin_only
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /help"""
     text = """📚 Команды:
@@ -379,6 +406,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+@admin_only
 async def db_copy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /db_copy - скопировать БД из MSSQL в SQLite"""
     if not settings.MSSQL_SERVER:
@@ -473,6 +501,7 @@ async def db_copy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sync_status['current_vendor'] = None
 
 
+@admin_only
 async def erp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /erp - обновить номенклатуру из 1C-ERP"""
     if not settings.ERP_BASE_URL:
@@ -560,6 +589,13 @@ async def _run_erp_sync(chat_id: int, message_id: int, context: ContextTypes.DEF
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопок"""
     query = update.callback_query
+
+    # Проверка доступа для callback-кнопок
+    admin_ids = settings.ADMIN_IDS
+    if admin_ids and update.effective_user.id not in admin_ids:
+        await query.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+
     from telegram.error import BadRequest as TgBadRequest
     try:
         await query.answer()
@@ -913,6 +949,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sync_status['current_vendor'] = None
 
 
+@admin_only
 async def synonyms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /synonyms - показать все синонимы вендоров"""
     repository = SqlRepository(settings.DATABASE_URL)
@@ -933,6 +970,8 @@ async def synonyms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@admin_only
+@admin_only
 async def add_synonym_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /add_synonym <Vendor> <VendorForFilter>"""
     args = context.args
@@ -958,6 +997,8 @@ async def add_synonym_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"Ошибка: {str(e)[:200]}")
 
 
+@admin_only
+@admin_only
 async def del_synonym_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /del_synonym - удалить синоним через inline-кнопки"""
     repository = SqlRepository(settings.DATABASE_URL)
@@ -1030,6 +1071,7 @@ async def _send_labor_page(target, page: int):
         await target.edit_message_text(text, reply_markup=reply_markup)
 
 
+@admin_only
 async def labor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /labor - просмотр и удаление записей Total_Labor"""
     global _labor_cache
@@ -1043,6 +1085,7 @@ async def labor_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_labor_page(update.message, 0)
 
 
+@admin_only
 async def labor_edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /labor_edit <Category> <NewValue> - изменить значение трудозатрат.
     Последний аргумент — новое значение, всё перед ним — название категории.
@@ -1084,6 +1127,7 @@ async def labor_edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
 
 
+@admin_only
 async def duplicates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /duplicates - найти и удалить дубли в Total_Price"""
     repository = SqlRepository(settings.DATABASE_URL)
@@ -1126,6 +1170,7 @@ async def duplicates_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+@admin_only
 async def backfill_vff_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /backfill_vff - заполнить VendorForFilter для всех записей"""
     await update.message.reply_text("Заполняю VendorForFilter...")

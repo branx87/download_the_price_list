@@ -1,7 +1,7 @@
 import logging
+import time
 import requests
 from pathlib import Path
-from datetime import datetime
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 
@@ -10,6 +10,9 @@ from utils.file_storage import PriceFileStorage
 
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+RETRY_DELAYS = (5, 15, 30)  # секунды между попытками
 
 
 class BaseDownloader(IDownloader, ABC):
@@ -26,18 +29,34 @@ class BaseDownloader(IDownloader, ABC):
         })
 
     def download(self, vendor: str) -> Path:
-        """Основной метод загрузки"""
-        logger.info(f"📥 Загрузка файла для {vendor}")
+        """Основной метод загрузки с retry."""
+        logger.info(f"Загрузка файла для {vendor}")
 
-        try:
-            url = self._get_download_url(vendor)
-            file_path = self._download_file(url, vendor)
-            self._validate_file(file_path)
-            logger.info(f"✅ Файл загружен: {file_path.name}")
-            return file_path
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки {vendor}: {e}")
-            raise
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                url = self._get_download_url(vendor)
+                file_path = self._download_file(url, vendor)
+                self._validate_file(file_path)
+                logger.info(f"Файл загружен: {file_path.name}")
+                return file_path
+            except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+                last_error = e
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt - 1]
+                    logger.warning(
+                        f"Попытка {attempt}/{MAX_RETRIES} для {vendor} не удалась: {e}. "
+                        f"Повтор через {delay}с..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Все {MAX_RETRIES} попытки загрузки {vendor} исчерпаны: {e}")
+            except Exception as e:
+                # Не-сетевые ошибки — не ретраим
+                logger.error(f"Ошибка загрузки {vendor}: {e}")
+                raise
+
+        raise last_error
 
     @abstractmethod
     def _get_download_url(self, vendor: str) -> str:
@@ -46,10 +65,8 @@ class BaseDownloader(IDownloader, ABC):
 
     def _download_file(self, url: str, vendor: str) -> Path:
         """Загружает файл по URL"""
-        # Определяем расширение из URL источника
         url_path = urlparse(url).path
         extension = Path(url_path).suffix or '.xlsx'
-        logger.info(f"[FIX] Расширение из URL: {extension} (URL: {url})")
         file_path = self.storage.get_storage_path(vendor, extension=extension)
 
         response = self.session.get(url, stream=True, timeout=60)
