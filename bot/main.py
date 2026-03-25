@@ -50,7 +50,7 @@ _orig_bot_initialize = Bot.initialize
 
 
 async def _patched_bot_initialize(self: Bot) -> None:
-    if self._initialized and self._bot_user is None:
+    if getattr(self, '_initialized', False) and getattr(self, '_bot_user', None) is None:
         logger.warning("[FIX] Bot._initialized=True но _bot_user=None — сбрасываем флаг для повторного get_me()")
         self._initialized = False
     await _orig_bot_initialize(self)
@@ -106,6 +106,7 @@ async def main() -> None:
         return
 
     _check_and_write_pid()
+    app = None
 
     try:
         proxy_url = os.getenv('PROXY_URL', '') or None
@@ -194,14 +195,15 @@ async def main() -> None:
         logger.critical("Фатальная ошибка: %s", e, exc_info=True)
     finally:
         _remove_pid()
-        try:
-            if app.updater.running:
-                await app.updater.stop()
-            if app.running:
-                await app.stop()
-            await app.shutdown()
-        except Exception as e:
-            logger.error("Ошибка при остановке: %s", e)
+        if app is not None:
+            try:
+                if app.updater and app.updater.running:
+                    await app.updater.stop()
+                if app.running:
+                    await app.stop()
+                await app.shutdown()
+            except Exception as e:
+                logger.error("Ошибка при остановке: %s", e)
         logger.info("Бот остановлен.")
 
 
