@@ -43,23 +43,24 @@ def register_jobs(app: Application) -> None:
     else:
         logger.info("[SCHEDULER] ERP-синхронизация не запланирована (нет ERP_BASE_URL или ERP_SYNC_TIMES)")
 
-    # --- Синхронизация прайсов: раз в неделю ---
-    sync_day = settings.SYNC_ALL_DAY       # 0=пн, 6=вс
+    # --- Синхронизация прайсов ---
+    sync_days = settings.SYNC_ALL_DAYS     # tuple[int, ...], 0=пн (Python-стиль)
     sync_time = settings.SYNC_ALL_TIME     # datetime.time
-    if sync_time is not None:
+    if sync_time is not None and sync_days:
         sync_time_aware = sync_time.replace(tzinfo=_TZ)
-        # PTB 20+: days 0-6 = Sun-Sat. settings.SYNC_ALL_DAY использует 0=Пн (Python-стиль).
+        # PTB 20+: days 0-6 = Sun-Sat. settings использует 0=Пн (Python-стиль).
         # Конвертируем: ptb_day = (python_weekday + 1) % 7
-        ptb_day = (sync_day + 1) % 7
+        ptb_days = tuple((d + 1) % 7 for d in sync_days)
         jq.run_daily(
             _job_sync_all,
             time=sync_time_aware,
-            days=(ptb_day,),
+            days=ptb_days,
             chat_id=chat_id,
             name="sync_all_weekly",
         )
         day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-        logger.info(f"[SCHEDULER] sync_all запланирован на {day_names[sync_day]} {sync_time.strftime('%H:%M')}")
+        days_str = ",".join(day_names[d] for d in sync_days)
+        logger.info(f"[SCHEDULER] sync_all запланирован на {days_str} {sync_time.strftime('%H:%M')}")
 
 
 # ---------------------------------------------------------------------------

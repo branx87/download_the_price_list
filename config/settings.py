@@ -75,8 +75,12 @@ class Settings:
                 times.append(time(int(part), 0))
         return times
 
-    # Sync all: день недели (0=пн, 6=вс) и время
-    SYNC_ALL_DAY = int(os.getenv('SYNC_ALL_DAY', '0'))  # понедельник
+    # Sync all: день(и) недели (0=пн, 6=вс) и время
+    # Примеры: "0" — только пн, "0,1,2,3,4,5,6" — каждый день
+    @property
+    def SYNC_ALL_DAYS(self) -> tuple[int, ...]:
+        raw = os.getenv('SYNC_ALL_DAY', '0')
+        return tuple(int(d.strip()) for d in raw.split(',') if d.strip().isdigit())
 
     @property
     def SYNC_ALL_TIME(self) -> time | None:
