@@ -2,11 +2,15 @@
 
 import asyncio
 import logging
+import os
 from datetime import time
+from zoneinfo import ZoneInfo
 
 from telegram.ext import Application
 
 from config.settings import settings
+
+_TZ = ZoneInfo(os.getenv('TZ', 'Europe/Moscow'))
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +31,10 @@ def register_jobs(app: Application) -> None:
     erp_times = settings.ERP_SYNC_TIMES  # список datetime.time
     if settings.ERP_BASE_URL and erp_times:
         for t in erp_times:
+            t_aware = t.replace(tzinfo=_TZ)
             jq.run_daily(
                 _job_erp_sync,
-                time=t,
+                time=t_aware,
                 chat_id=chat_id,
                 name=f"erp_sync_{t.strftime('%H%M')}",
             )
@@ -42,9 +47,10 @@ def register_jobs(app: Application) -> None:
     sync_day = settings.SYNC_ALL_DAY       # 0=пн, 6=вс
     sync_time = settings.SYNC_ALL_TIME     # datetime.time
     if sync_time is not None:
+        sync_time_aware = sync_time.replace(tzinfo=_TZ)
         jq.run_daily(
             _job_sync_all,
-            time=sync_time,
+            time=sync_time_aware,
             days=(sync_day,),
             chat_id=chat_id,
             name="sync_all_weekly",
