@@ -1,18 +1,19 @@
 # adapters/downloaders/iek_downloader.py
-from .base_downloader import BaseDownloader
+from .base_downloader import BaseDownloader, MAX_RETRIES, RETRY_DELAYS
 from pathlib import Path
-from datetime import datetime
 import zipfile
 import time
 import logging
+import requests
 
 logger = logging.getLogger(__name__)
+
 
 class IekDownloader(BaseDownloader):
     def _get_download_url(self, vendor: str) -> str:
         """Не используется - логика в download()"""
         return ""
-    
+
     def download(self, vendor: str) -> Path:
         """Переопределяем полностью - специальная логика для IEK"""
         logger.info(f"📥 Загрузка файла для {vendor}")
@@ -26,16 +27,13 @@ class IekDownloader(BaseDownloader):
         }
         data = {'submit': 'скачать прайс-лист'}
 
-        try:
-            logger.info(f"POST загрузка IEK")
-            response = self.session.post(url, headers=headers, data=data, stream=True, timeout=60)
-            response.raise_for_status()
+        response = self._post_with_retry(url, headers, data)
 
+        try:
             # Сохраняем временный ZIP
             with open(temp_filepath, 'wb') as f:
                 for chunk in response.iter_content(1024):
                     f.write(chunk)
-
             response.close()
 
             # Распаковываем ZIP
@@ -76,3 +74,25 @@ class IekDownloader(BaseDownloader):
             if final_filepath.exists():
                 final_filepath.unlink(missing_ok=True)
             raise
+
+    def _post_with_retry(self, url: str, headers: dict, data: dict):
+        """POST-запрос с retry при сетевых ошибках."""
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                logger.info(f"POST загрузка IEK (попытка {attempt}/{MAX_RETRIES})")
+                response = self.session.post(url, headers=headers, data=data, stream=True, timeout=60)
+                response.raise_for_status()
+                return response
+            except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+                last_error = e
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt - 1]
+                    logger.warning(
+                        f"Попытка {attempt}/{MAX_RETRIES} для IEK не удалась: {e}. "
+                        f"Повтор через {delay}с..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Все {MAX_RETRIES} попытки загрузки IEK исчерпаны: {e}")
+        raise last_error

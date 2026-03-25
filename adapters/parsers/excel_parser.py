@@ -92,7 +92,7 @@ class ExcelParser(IParser):
                 # Ищем строку с заголовками
                 header_row = None
                 for idx in range(min(20, len(df))):
-                    row_str = df.iloc[idx].astype(str).str.lower().tolist()
+                    row_str = [str(v).lower() for v in df.iloc[idx].tolist()]
                     if any('описание' in cell or 'цена' in cell for cell in row_str):
                         header_row = idx
                         logger.info(f"Найдена строка заголовков DKC: {idx}")
@@ -166,7 +166,7 @@ class ExcelParser(IParser):
         required_columns = list(column_mapping.values())
 
         for idx in range(min(20, len(df))):
-            row_values = df.iloc[idx].astype(str).str.lower().tolist()
+            row_values = [str(v).lower() for v in df.iloc[idx].tolist()]
             matches = sum(
                 1 for col in required_columns
                 if any(str(col).lower() in val for val in row_values)
