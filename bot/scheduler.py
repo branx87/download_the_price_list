@@ -48,10 +48,13 @@ def register_jobs(app: Application) -> None:
     sync_time = settings.SYNC_ALL_TIME     # datetime.time
     if sync_time is not None:
         sync_time_aware = sync_time.replace(tzinfo=_TZ)
+        # PTB 20+: days 0-6 = Sun-Sat. settings.SYNC_ALL_DAY использует 0=Пн (Python-стиль).
+        # Конвертируем: ptb_day = (python_weekday + 1) % 7
+        ptb_day = (sync_day + 1) % 7
         jq.run_daily(
             _job_sync_all,
             time=sync_time_aware,
-            days=(sync_day,),
+            days=(ptb_day,),
             chat_id=chat_id,
             name="sync_all_weekly",
         )
