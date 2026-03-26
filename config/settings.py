@@ -84,11 +84,11 @@ class Settings:
 
     @property
     def SYNC_ALL_TIME(self) -> time | None:
-        raw = os.getenv('SYNC_ALL_TIME', '')
+        raw = os.getenv('SYNC_ALL_TIME', '').strip().split(',')[0].strip()
         if not raw:
             return None
         if ':' in raw:
-            h, m = raw.split(':')
+            h, m = raw.split(':', 1)
             return time(int(h), int(m))
         if raw.isdigit():
             return time(int(raw), 0)
