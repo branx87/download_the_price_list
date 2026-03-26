@@ -4,6 +4,7 @@ from typing import List
 
 from adapters.erp.erp_client import ErpClient
 from adapters.database.sql_repository import SqlRepository
+from config.settings import settings
 from domain.entities.erp_sync_result import ErpSyncResult
 from domain.services.data_normalizer import DataNormalizer
 
@@ -37,7 +38,16 @@ class ErpSyncService:
             result.total_received = len(raw_items)
             logger.info(f"Получено {len(raw_items)} позиций из 1C-ERP")
 
-            # 2. Проверяем дубликаты по code
+            # 2. Фильтруем по типу номенклатуры (ERP_SKIP_ITEM_TYPES)
+            skip_types = settings.ERP_SKIP_ITEM_TYPES
+            if skip_types:
+                before = len(raw_items)
+                raw_items = [i for i in raw_items if i.get('item_type', '') not in skip_types]
+                skipped = before - len(raw_items)
+                if skipped:
+                    logger.info(f"[ERP] Пропущено по типу номенклатуры: {skipped} из {before}")
+
+            # 3. Проверяем дубликаты по code
             unique_items, duplicate_codes = self._check_duplicates(raw_items)
             result.duplicate_codes = duplicate_codes
             result.skipped_duplicates = len(raw_items) - len(unique_items)
@@ -49,7 +59,7 @@ class ErpSyncService:
                 if len(duplicate_codes) > 10:
                     logger.warning(f"  ... и ещё {len(duplicate_codes) - 10}")
 
-            # 3. Загружаем маппинг синонимов для VendorForFilter
+            # 4. Загружаем маппинг синонимов для VendorForFilter
             # Ключи нормализуем в uppercase — иначе vendor_norm (всегда upper) не найдёт
             # синоним с raw-ключом типа 'Овен' или 'КМ-профиль'
             synonyms_map = {}
