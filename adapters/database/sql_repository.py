@@ -983,6 +983,22 @@ class SqlRepository(IRepository):
             session.commit()
             return result.rowcount
 
+    def normalize_price_on_request_text(self) -> int:
+        """Привести все варианты 'по запросу' к единому тексту 'Цена по запросу' по всей таблице."""
+        with self.SessionLocal() as session:
+            query = text("""
+                UPDATE Total_Price
+                SET PriceText = 'Цена по запросу'
+                WHERE LOWER(PriceText) LIKE '%запрос%'
+                  AND PriceText <> 'Цена по запросу'
+            """)
+            result = session.execute(query)
+            session.commit()
+            count = result.rowcount
+            if count:
+                logger.info("[FIX] normalize_price_on_request_text: нормализовано %d записей", count)
+            return count
+
     # ========== VendorSynonyms ==========
 
     def get_all_synonyms(self) -> list:

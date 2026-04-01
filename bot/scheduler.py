@@ -98,6 +98,12 @@ async def _job_erp_sync(context) -> None:
         if result.errors:
             lines.append(f"❌ Ошибок: {result.errors}")
 
+        # Нормализуем все варианты 'по запросу' → 'Цена по запросу' по всей таблице
+        if hasattr(repository, 'normalize_price_on_request_text'):
+            normalized = repository.normalize_price_on_request_text()
+            if normalized:
+                lines.append(f"🔤 Нормализовано 'Цена по запросу': {normalized}")
+
         await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
         logger.info("[SCHEDULER] ERP-синхронизация завершена: added=%s, linked=%s", result.added, result.updated)
 
