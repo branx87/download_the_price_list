@@ -79,6 +79,11 @@ class SyncService:
             new_items_with_price_map = {item.article: item for item in new_items_with_price}
             new_articles_with_price = set(new_items_with_price_map.keys())
 
+            # Позиции "по запросу" (price=0): разбиваем на новые и существующие
+            price_on_request_items = [item for item in new_items if float(item.price) == 0]
+            price_on_request_new = [i for i in price_on_request_items if i.article not in current_articles]
+            price_on_request_existing = [i.article for i in price_on_request_items if i.article in current_articles]
+
             # Новые позиции (есть в файле, нет в БД, и есть цена)
             to_add = [
                 new_items_with_price_map[art]
@@ -132,6 +137,14 @@ class SyncService:
                 result.updated_items_list = to_update
                 result.price_changes_list = price_changes
                 logger.info(f"🔄 Обновлено цен: {updated} (из них изменений цен: {len(price_changes)})")
+
+            # Позиции "по запросу": новые добавляем, существующим обновляем PriceText
+            if price_on_request_new:
+                self.repository.add_items(price_on_request_new, synonyms_map=synonyms_map)
+                logger.info(f"💬 Добавлено 'Цена по запросу' (новых): {len(price_on_request_new)}")
+            if price_on_request_existing and hasattr(self.repository, 'mark_price_on_request'):
+                self.repository.mark_price_on_request(vendor, price_on_request_existing)
+                logger.info(f"💬 Обновлено 'Цена по запросу' (существующих): {len(price_on_request_existing)}")
 
             if disappeared_articles:
                 marked = self.repository.mark_as_disappeared(vendor, disappeared_articles)

@@ -223,8 +223,8 @@ class SqlRepository(IRepository):
 
         query = text("""
             INSERT INTO Total_Price
-            (Vendor, Part_Num, Descr, Price, Units, Storage, VendorForFilter, Status, updated_at)
-            VALUES (:vendor, :article, :descr, :price, :units, :storage, :vendor_for_filter, 'new', :updated_at)
+            (Vendor, Part_Num, Descr, Price, Units, Storage, VendorForFilter, PriceText, Status, updated_at)
+            VALUES (:vendor, :article, :descr, :price, :units, :storage, :vendor_for_filter, :price_text, 'new', :updated_at)
         """)
 
         current_time = datetime.now()
@@ -239,6 +239,7 @@ class SqlRepository(IRepository):
                 "vendor_for_filter": self.resolve_vendor_for_filter(
                     self._safe_str(item.vendor), synonyms_map
                 ),
+                "price_text": 'Цена по запросу' if float(item.price) == 0 else None,
                 "updated_at": current_time
             }
             for item in items
@@ -358,6 +359,38 @@ class SqlRepository(IRepository):
                     session.commit()
                     updated_count += len(all_data[i:i + batch_size])
             return updated_count
+
+    def mark_price_on_request(self, vendor: str, articles: List[str]) -> int:
+        """Обновить PriceText='Цена по запросу' и Price=0 для существующих позиций (батчами по 500)."""
+        if not articles:
+            return 0
+
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+        current_time = datetime.now()
+        updated_count = 0
+
+        for i in range(0, len(articles), 500):
+            batch = articles[i:i + 500]
+            placeholders = ', '.join([f':art{j}' for j in range(len(batch))])
+            params = {'vendor': vendor_normalized, 'updated_at': current_time}
+            params.update({f'art{j}': art for j, art in enumerate(batch)})
+
+            query = text(f"""
+                UPDATE Total_Price
+                SET PriceText = 'Цена по запросу',
+                    Price = 0,
+                    updated_at = :updated_at
+                WHERE Vendor = :vendor
+                AND Part_Num IN ({placeholders})
+            """)
+
+            with self.SessionLocal() as session:
+                result = session.execute(query, params)
+                session.commit()
+                updated_count += result.rowcount
+
+        logger.info("[FIX] mark_price_on_request: vendor=%s, обновлено %d/%d", vendor, updated_count, len(articles))
+        return updated_count
 
     def mark_as_disappeared(self, vendor: str, articles: List[str]) -> int:
         """Пометить позиции как исчезнувшие (батчами по 500 с промежуточным commit)"""
