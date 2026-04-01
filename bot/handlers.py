@@ -15,6 +15,7 @@ from domain.services.sync_service import SyncService
 from domain.services.report_service import ReportService
 from adapters.erp.erp_client import ErpClient
 from domain.services.erp_sync_service import ErpSyncService
+from adapters.downloaders.upload_downloader import UploadDownloader
 
 
 logger = logging.getLogger(__name__)
@@ -1183,3 +1184,117 @@ async def backfill_vff_command(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Ошибка backfill: {e}", exc_info=True)
         await update.message.reply_text(f"Ошибка: {str(e)[:300]}")
+
+
+# ─── Загрузка прайса через файл ───────────────────────────────────────────────
+
+# Карта ключевых слов в имени файла → имя вендора в реестре
+_FILENAME_VENDOR_MAP = {
+    'akel': 'AKEL',
+}
+
+# Вендоры, которые принимают файл через бота (используется в подсказке)
+_UPLOAD_VENDORS = list(_FILENAME_VENDOR_MAP.values())
+
+_MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB — ограничение Telegram Bot API
+
+
+def detect_vendor_from_filename(filename: str) -> str | None:
+    """Определяет вендора по ключевым словам в имени файла."""
+    lower = filename.lower()
+    for keyword, vendor in _FILENAME_VENDOR_MAP.items():
+        if keyword in lower:
+            return vendor
+    return None
+
+
+@admin_only
+async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик входящего документа — загружает прайс вендора из файла.
+
+    Администратор отправляет Excel-файл боту. Бот определяет вендора по имени
+    файла, парсит прайс и синхронизирует данные с БД.
+    """
+    doc = update.message.document
+    if doc is None:
+        return
+
+    filename = doc.file_name or ''
+    logger.info("[FIX] upload_price_handler: filename=%s size=%s", filename, doc.file_size)
+
+    # Проверяем размер файла
+    if doc.file_size and doc.file_size > _MAX_UPLOAD_SIZE:
+        await update.message.reply_text(
+            f"⚠️ Файл слишком большой ({doc.file_size // (1024*1024)} МБ).\n"
+            f"Telegram Bot API не позволяет скачивать файлы > 20 МБ."
+        )
+        return
+
+    # Определяем вендора по имени файла
+    vendor = detect_vendor_from_filename(filename)
+    if vendor is None:
+        vendors_hint = ', '.join(_UPLOAD_VENDORS)
+        await update.message.reply_text(
+            f"⚠️ Не удалось определить вендора по имени файла: <b>{filename}</b>\n\n"
+            f"Поддерживаемые вендоры (загрузка файлом): {vendors_hint}\n"
+            f"Имя файла должно содержать ключевое слово вендора.",
+            parse_mode='HTML',
+        )
+        return
+
+    await update.message.reply_text(f"📥 Получен файл <b>{filename}</b>\nВендор: <b>{vendor}</b>\nНачинаю синхронизацию...", parse_mode='HTML')
+
+    try:
+        # Скачиваем файл во временную директорию
+        settings.PRICE_FILES_DIR.mkdir(parents=True, exist_ok=True)
+        dest_path = settings.PRICE_FILES_DIR / filename
+
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(str(dest_path))
+        logger.info("[FIX] upload_price_handler: файл сохранён path=%s", dest_path)
+
+        # Создаём сервис синхронизации с UploadDownloader
+        normalizer = ArticleNormalizer()
+        registry = VendorRegistry(settings.PRICE_FILES_DIR, normalizer)
+        repository = SqlRepository(settings.DATABASE_URL)
+        report_service = ReportService(settings.PROJECT_ROOT / "reports")
+
+        downloader = UploadDownloader(dest_path)
+        parser = registry.create_parser(vendor)
+
+        service = SyncService(
+            downloader=downloader,
+            parser=parser,
+            repository=repository,
+            price_change_threshold=settings.PRICE_CHANGE_THRESHOLD,
+            report_service=report_service,
+        )
+
+        result = await asyncio.get_event_loop().run_in_executor(None, service.sync_vendor, vendor)
+        logger.info("[FIX] upload_price_handler: sync done vendor=%s total=%s new=%s updated=%s",
+                    vendor, result.total_items, result.new_items, result.updated_items)
+
+        report_lines = [
+            f"✅ <b>{vendor}</b> — синхронизация завершена!",
+            f"",
+            f"📦 Всего позиций: {result.total_items}",
+            f"➕ Новых: {result.new_items}",
+            f"🔄 Обновлено: {result.updated_items}",
+        ]
+        if result.price_changes_count > 0:
+            report_lines.append(f"💰 Изменений цен: {result.price_changes_count}")
+        if result.disappeared_items > 0:
+            report_lines.append(f"👻 Исчезло: {result.disappeared_items}")
+
+        last_stats = getattr(parser, '_last_stats', None)
+        if last_stats and last_stats.get('total', 0) > 0:
+            report_lines.append(
+                f"📋 Листов в книге: {last_stats['total']}, "
+                f"с заголовками: {last_stats['with_headers']}"
+            )
+
+        await update.message.reply_text("\n".join(report_lines), parse_mode='HTML')
+
+    except Exception as e:
+        logger.error("[FIX] upload_price_handler: ошибка vendor=%s: %s", vendor, e, exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка при синхронизации <b>{vendor}</b>:\n{str(e)[:300]}", parse_mode='HTML')
