@@ -1,6 +1,6 @@
 from pathlib import Path
-from typing import Dict, Any
-from dataclasses import dataclass
+from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
 
 from adapters.downloaders.simple_http import SimpleHttpDownloader
 from adapters.downloaders.auth_http import AuthHttpDownloader
@@ -8,7 +8,9 @@ from adapters.downloaders.iek_downloader import IekDownloader
 from adapters.downloaders.chint_downloader import ChintDownloader
 from adapters.downloaders.ekf_downloader import EkfDownloader
 from adapters.downloaders.owen_downloader import OwenDownloader
+from adapters.downloaders.upload_downloader import UploadDownloader
 from adapters.parsers.excel_parser import ExcelParser
+from adapters.parsers.akel_parser import AkelParser
 from utils.normalizer import ArticleNormalizer
 from adapters.downloaders.dkc_downloader import DkcDownloader
 
@@ -21,6 +23,8 @@ class VendorConfig:
     downloader_class: type
     downloader_params: Dict[str, Any]
     parser_config: Dict[str, Any]
+    # Если задан — create_parser() вернёт экземпляр этого класса вместо ExcelParser
+    parser_class: Optional[type] = None
 
 
 class VendorRegistry:
@@ -139,6 +143,17 @@ class VendorRegistry:
                     }
                 }
             ),
+
+            # ========== AKEL (загрузка файла вручную через бота) ==========
+            'AKEL': VendorConfig(
+                name='AKEL',
+                # UploadDownloader не используется через registry — хендлер создаёт его напрямую.
+                # Указываем класс только для полноты записи в реестре.
+                downloader_class=UploadDownloader,
+                downloader_params={},
+                parser_config={},
+                parser_class=AkelParser,
+            ),
         }
 
     def get_vendor_names(self) -> list:
@@ -158,5 +173,8 @@ class VendorRegistry:
         config = self._vendors.get(vendor)
         if not config:
             raise ValueError(f"Неизвестный вендор: {vendor}")
+
+        if config.parser_class is not None:
+            return config.parser_class()
 
         return ExcelParser(config.parser_config, self.normalizer)

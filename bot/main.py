@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from telegram import Bot
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from telegram.error import NetworkError, TimedOut, Conflict
 from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
@@ -35,7 +35,8 @@ from bot.handlers import (
     duplicates_command,
     labor_command,
     labor_edit_command,
-    button_callback
+    button_callback,
+    upload_price_handler,
 )
 from bot.scheduler import register_jobs
 
@@ -161,6 +162,7 @@ async def main() -> None:
         app.add_handler(CommandHandler("labor", labor_command))
         app.add_handler(CommandHandler("labor_edit", labor_edit_command))
         app.add_handler(CallbackQueryHandler(button_callback))
+        app.add_handler(MessageHandler(filters.Document.ALL, upload_price_handler))
         app.add_error_handler(error_handler)
 
         # Регистрируем периодические задачи
