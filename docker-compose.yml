@@ -1,6 +1,9 @@
 services:
   price-sync-bot:
-    build: .
+    build:
+      context: .
+      args:
+        - PROXY_URL
     container_name: price-sync-bot
     restart: unless-stopped
     env_file: .env
