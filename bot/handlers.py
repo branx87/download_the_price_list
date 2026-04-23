@@ -99,6 +99,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /duplicates - Найти и удалить дубли
 /labor - Управление трудозатратами
 /labor_edit - Изменить значение трудозатрат
+/shina - Управление ценами шин (ШИНА)
 /db_copy - Скопировать БД из MSSQL
 /status - Статус
 /debug - Показать ошибки
@@ -397,6 +398,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /duplicates - Найти и удалить дубли в Total_Price
 /labor - Управление таблицей трудозатрат
 /labor_edit <Category> <Value> - Изменить трудозатраты
+/shina - Цены шин: /shina медь 1400  или  /shina алюм 500
 /db_copy - Скопировать БД из MSSQL
 /status - Статус синхронизаций
 /debug - Показать ошибки
@@ -1186,11 +1188,99 @@ async def backfill_vff_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"Ошибка: {str(e)[:300]}")
 
 
+# ─── ШИНА ─────────────────────────────────────────────────────────────────────
+
+@admin_only
+async def shina_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /shina [медь|алюм <цена>]
+
+    /shina               — показать текущие цены
+    /shina медь 1400     — обновить цену меди и пересчитать прайс
+    /shina алюм 500      — обновить цену алюминия и пересчитать прайс
+    """
+    from domain.services.shina_service import ShinaService
+
+    repository = SqlRepository(settings.DATABASE_URL)
+    service = ShinaService(repository, None)
+
+    args = context.args
+
+    if not args:
+        try:
+            prices = service.get_current_prices()
+            count  = service.get_config_count()
+        except Exception as e:
+            logger.error("[SHINA] shina_command get_prices: %s", e, exc_info=True)
+            await update.message.reply_text(f"❌ Ошибка чтения shina_config: {str(e)[:200]}")
+            return
+
+        if not prices:
+            await update.message.reply_text(
+                "⚠️ shina_config пуст.\n\n"
+                "Отправьте Excel-файл шин боту (имя файла должно содержать «shina»)."
+            )
+            return
+
+        lines = ["📊 Текущие цены шин:\n"]
+        if 'медь' in prices:
+            lines.append(f"🔴 Медь: {prices['медь']} руб/кг")
+        if 'алюм' in prices:
+            lines.append(f"⚪ Алюминий: {prices['алюм']} руб/кг")
+        lines.append(f"\n📦 Позиций в конфиге: {count}")
+        lines.append("\nОбновить: /shina медь 1400  или  /shina алюм 500")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if len(args) != 2:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/shina — текущие цены\n"
+            "/shina медь 1400 — обновить цену меди\n"
+            "/shina алюм 500 — обновить цену алюминия"
+        )
+        return
+
+    material_input = args[0]
+    try:
+        price_per_kg = float(args[1].replace(',', '.'))
+    except ValueError:
+        await update.message.reply_text(f"❌ Некорректная цена: {args[1]!r}")
+        return
+
+    if price_per_kg <= 0:
+        await update.message.reply_text("❌ Цена должна быть больше 0")
+        return
+
+    msg = await update.message.reply_text(f"🔄 Обновляю цену {material_input}...")
+    try:
+        loop = asyncio.get_event_loop()
+        updated = await loop.run_in_executor(None, service.update_price, material_input, price_per_kg)
+
+        if updated == 0:
+            await msg.edit_text(
+                f"⚠️ Материал «{material_input}» не найден в shina_config.\n\n"
+                "Сначала загрузите Excel-файл шин."
+            )
+        else:
+            await msg.edit_text(
+                f"✅ Цена обновлена!\n\n"
+                f"Материал: {material_input}\n"
+                f"Цена за кг: {price_per_kg} руб\n"
+                f"Обновлено позиций в Total_Price: {updated}"
+            )
+    except ValueError as e:
+        await msg.edit_text(f"❌ {e}")
+    except Exception as e:
+        logger.error("[SHINA] shina_command update: %s", e, exc_info=True)
+        await msg.edit_text(f"❌ Ошибка: {str(e)[:300]}")
+
+
 # ─── Загрузка прайса через файл ───────────────────────────────────────────────
 
 # Карта ключевых слов в имени файла → имя вендора в реестре
 _FILENAME_VENDOR_MAP = {
-    'akel': 'AKEL',
+    'akel':  'AKEL',
+    'shina': 'ШИНА',
 }
 
 # Вендоры, которые принимают файл через бота (используется в подсказке)
@@ -1206,6 +1296,34 @@ def detect_vendor_from_filename(filename: str) -> str | None:
         if keyword in lower:
             return vendor
     return None
+
+
+async def _handle_shina_upload(update: Update, file_path):
+    """Загружает конфигурацию шин из Excel в shina_config и пересчитывает Total_Price."""
+    from adapters.parsers.shina_parser import ShinaParser
+    from domain.services.shina_service import ShinaService
+
+    msg = await update.message.reply_text("🔄 Загружаю конфигурацию шин...")
+    try:
+        repository = SqlRepository(settings.DATABASE_URL)
+        service = ShinaService(repository, ShinaParser())
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, service.load_from_excel, file_path)
+
+        await msg.edit_text(
+            f"✅ <b>ШИНА</b> — конфигурация загружена!\n\n"
+            f"📦 Позиций в конфиге: {result['loaded']}\n"
+            f"🔄 Обновлено в Total_Price: {result['updated']}\n\n"
+            f"🔴 Медь: {result['copper_price_per_kg']} руб/кг\n"
+            f"⚪ Алюминий: {result['alum_price_per_kg']} руб/кг",
+            parse_mode='HTML',
+        )
+        logger.info("[SHINA] upload: loaded=%d updated=%d",
+                    result['loaded'], result['updated'])
+    except Exception as e:
+        logger.error("[SHINA] _handle_shina_upload: %s", e, exc_info=True)
+        await msg.edit_text(f"❌ Ошибка загрузки ШИНА:\n{str(e)[:300]}")
 
 
 @admin_only
@@ -1252,6 +1370,11 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         tg_file = await context.bot.get_file(doc.file_id)
         await tg_file.download_to_drive(str(dest_path))
         logger.info("[FIX] upload_price_handler: файл сохранён path=%s", dest_path)
+
+        # Специальный путь для ШИНА
+        if vendor == 'ШИНА':
+            await _handle_shina_upload(update, dest_path)
+            return
 
         # Создаём сервис синхронизации с UploadDownloader
         normalizer = ArticleNormalizer()

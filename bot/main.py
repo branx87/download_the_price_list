@@ -35,6 +35,7 @@ from bot.handlers import (
     duplicates_command,
     labor_command,
     labor_edit_command,
+    shina_command,
     button_callback,
     upload_price_handler,
 )
@@ -161,6 +162,7 @@ async def main() -> None:
         app.add_handler(CommandHandler("duplicates", duplicates_command))
         app.add_handler(CommandHandler("labor", labor_command))
         app.add_handler(CommandHandler("labor_edit", labor_edit_command))
+        app.add_handler(CommandHandler("shina", shina_command))
         app.add_handler(CallbackQueryHandler(button_callback))
         app.add_handler(MessageHandler(filters.Document.ALL, upload_price_handler))
         app.add_error_handler(error_handler)

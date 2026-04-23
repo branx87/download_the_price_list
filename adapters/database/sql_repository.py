@@ -1401,6 +1401,169 @@ class SqlRepository(IRepository):
                 logger.info(f"[LABOR] Обновлено: {category!r} = {new_value}")
             return updated
 
+    # ========== shina_config ==========
+
+    def upsert_shina_config(self, items: list) -> int:
+        """Batch upsert в таблицу shina_config."""
+        if not items:
+            return 0
+
+        if not self.is_sqlite:
+            with self.SessionLocal() as session:
+                try:
+                    for item in items:
+                        session.execute(text("""
+                            MERGE shina_config AS target
+                            USING (SELECT :part_num     AS part_num,
+                                          :descr        AS descr,
+                                          :weight_per_m AS weight_per_m,
+                                          :material     AS material,
+                                          :price_per_kg AS price_per_kg) AS source
+                                ON target.part_num = source.part_num
+                            WHEN MATCHED THEN
+                                UPDATE SET target.descr        = source.descr,
+                                           target.weight_per_m = source.weight_per_m,
+                                           target.material     = source.material,
+                                           target.price_per_kg = source.price_per_kg
+                            WHEN NOT MATCHED THEN
+                                INSERT (part_num, descr, weight_per_m, material, price_per_kg)
+                                VALUES (source.part_num, source.descr, source.weight_per_m,
+                                        source.material, source.price_per_kg);
+                        """), item)
+                    session.commit()
+                except Exception as e:
+                    logger.error("[SHINA] upsert_shina_config: %s", e, exc_info=True)
+                    session.rollback()
+                    raise
+        else:
+            with self.SessionLocal() as session:
+                for item in items:
+                    session.execute(text("""
+                        INSERT OR REPLACE INTO shina_config
+                            (part_num, descr, weight_per_m, material, price_per_kg)
+                        VALUES (:part_num, :descr, :weight_per_m, :material, :price_per_kg)
+                    """), item)
+                session.commit()
+
+        logger.info("[SHINA] upsert_shina_config: %d записей", len(items))
+        return len(items)
+
+    def update_shina_price_per_kg(self, material: str, price_per_kg: float) -> int:
+        """Обновляет price_per_kg для всех позиций материала в shina_config."""
+        with self.SessionLocal() as session:
+            result = session.execute(text("""
+                UPDATE shina_config SET price_per_kg = :price_per_kg WHERE material = :material
+            """), {'price_per_kg': price_per_kg, 'material': material})
+            session.commit()
+            count = result.rowcount
+            logger.info("[SHINA] update_shina_price_per_kg: material=%r price=%.2f rows=%d",
+                        material, price_per_kg, count)
+            return count
+
+    def get_shina_prices(self) -> dict:
+        """Возвращает {material: price_per_kg} из shina_config."""
+        with self.SessionLocal() as session:
+            result = session.execute(text(
+                "SELECT DISTINCT material, price_per_kg FROM shina_config"
+            ))
+            return {row[0]: row[1] for row in result}
+
+    def get_shina_config_count(self) -> int:
+        with self.SessionLocal() as session:
+            row = session.execute(text("SELECT COUNT(*) FROM shina_config")).fetchone()
+            return row[0] if row else 0
+
+    def recalculate_shina_to_total_price(self, material: str = None) -> int:
+        """Пересчитывает weight_per_m * price_per_kg и делает upsert в Total_Price.
+
+        material — если задан, пересчитываются только позиции этого материала.
+        """
+        current_time = datetime.now()
+
+        with self.SessionLocal() as session:
+            if material:
+                rows = session.execute(text(
+                    "SELECT part_num, descr, weight_per_m, price_per_kg FROM shina_config"
+                    " WHERE material = :material"
+                ), {'material': material}).fetchall()
+            else:
+                rows = session.execute(text(
+                    "SELECT part_num, descr, weight_per_m, price_per_kg FROM shina_config"
+                )).fetchall()
+
+        if not rows:
+            return 0
+
+        items = [
+            {
+                'part_num':   row[0],
+                'descr':      row[1],
+                'price':      round(row[2] * row[3], 2),
+                'units':      'м',
+                'updated_at': current_time,
+            }
+            for row in rows
+        ]
+
+        if not self.is_sqlite:
+            with self.SessionLocal() as session:
+                try:
+                    affected = 0
+                    for item in items:
+                        result = session.execute(text("""
+                            MERGE Total_Price AS target
+                            USING (SELECT N'ШИНА'    AS Vendor,
+                                          :part_num  AS Part_Num,
+                                          :descr     AS Descr,
+                                          :price     AS Price,
+                                          :units     AS Units,
+                                          :updated_at AS upd_at) AS source
+                                ON target.Vendor = source.Vendor
+                               AND target.Part_Num = source.Part_Num
+                            WHEN MATCHED THEN
+                                UPDATE SET target.Price      = source.Price,
+                                           target.Descr      = source.Descr,
+                                           target.Status     = 'price_changed',
+                                           target.updated_at = source.upd_at
+                            WHEN NOT MATCHED THEN
+                                INSERT (Vendor, Part_Num, Descr, Price, Units,
+                                        VendorForFilter, Status, updated_at)
+                                VALUES (source.Vendor, source.Part_Num, source.Descr,
+                                        source.Price, source.Units,
+                                        N'ШИНА', 'new', source.upd_at);
+                        """), item)
+                        affected += result.rowcount
+                    session.commit()
+                    if affected != len(items):
+                        logger.warning(
+                            "[SHINA] MERGE: ожидалось %d, затронуто %d — проверьте Vendor/Part_Num в Total_Price",
+                            len(items), affected
+                        )
+                    else:
+                        logger.info(
+                            "[SHINA] recalculate_shina MSSQL: MERGE %d позиций — все затронуты",
+                            affected
+                        )
+                    return affected
+                except Exception as e:
+                    logger.error("[SHINA] recalculate_shina_to_total_price: %s", e, exc_info=True)
+                    session.rollback()
+                    raise
+        else:
+            with self.SessionLocal() as session:
+                for item in items:
+                    session.execute(text("""
+                        INSERT OR REPLACE INTO Total_Price
+                            (Vendor, Part_Num, Descr, Price, Units,
+                             VendorForFilter, Status, updated_at)
+                        VALUES ('ШИНА', :part_num, :descr, :price, :units,
+                                'ШИНА', 'price_changed', :updated_at)
+                    """), item)
+                session.commit()
+
+        logger.info("[SHINA] recalculate_shina_to_total_price (sqlite): %d позиций", len(items))
+        return len(items)
+
     def backfill_vendor_for_filter(self, synonyms_map: dict) -> int:
         """Заполнить VendorForFilter для записей где он NULL или пустой"""
         total_updated = 0
