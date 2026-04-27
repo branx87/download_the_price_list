@@ -164,6 +164,26 @@ class VendorRegistry:
                 }
             ),
 
+            # ========== SE / Систем Электрик (загрузка файла вручную через бота) ==========
+            'SE': VendorConfig(
+                name='SE',
+                downloader_class=UploadDownloader,
+                downloader_params={},
+                parser_config={
+                    'engine': 'openpyxl',
+                    'sheet_name_pattern': 'Тариф Москва',
+                    'header_row': 2,
+                    'columns': {
+                        'article': 'Референс',
+                        'description': 'Описание референса',
+                        # поиск по подстроке — дата в названии меняется каждый прайс
+                        'price': 'без НДС',
+                        'units': 'Единица измерения',
+                        'storage': 'со склада\nМосква',
+                    }
+                }
+            ),
+
             # ========== AKEL (загрузка файла вручную через бота) ==========
             'AKEL': VendorConfig(
                 name='AKEL',

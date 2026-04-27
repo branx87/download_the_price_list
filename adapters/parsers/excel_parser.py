@@ -187,16 +187,27 @@ class ExcelParser(IParser):
         except ValueError:
             return 0.0
 
+    def _find_col(self, df: pd.DataFrame, name: str) -> str:
+        """Точное совпадение, затем поиск по подстроке (без учёта регистра)."""
+        if name in df.columns:
+            return name
+        name_lower = name.lower()
+        for c in df.columns:
+            if name_lower in str(c).lower():
+                return c
+        return name  # вернём как есть — ошибка будет залогирована ниже
+
     def _to_price_items(self, df: pd.DataFrame, vendor: str) -> List[PriceItem]:
         """Преобразует DataFrame в список PriceItem."""
         items = []
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
         columns_config = self.config.get('columns', {})
 
-        article_col = columns_config.get('article', 'Код')
-        desc_col = columns_config.get('description', 'Описание')
-        price_col = columns_config.get('price', 'Цена с НДС, руб./м(шт)')
-        unit_col = columns_config.get('units', 'Ед. Изм.')
+        article_col = self._find_col(df, columns_config.get('article', 'Код'))
+        desc_col = self._find_col(df, columns_config.get('description', 'Описание'))
+        price_col = self._find_col(df, columns_config.get('price', 'Цена с НДС, руб./м(шт)'))
+        unit_col = self._find_col(df, columns_config.get('units', 'Ед. Изм.'))
+        storage_col = self._find_col(df, columns_config['storage']) if 'storage' in columns_config else None
 
         logger.info(f"Используем колонки: article={article_col}, price={price_col}")
 
@@ -258,12 +269,20 @@ class ExcelParser(IParser):
                         str(unit_val) if unit_val and not pd.isna(unit_val) else 'шт'
                     )
 
+                storage = ''
+                if storage_col and storage_col in df.columns:
+                    sv = row[storage_col]
+                    if isinstance(sv, pd.Series):
+                        sv = sv.iloc[0] if len(sv) > 0 else ''
+                    storage = str(sv).strip() if sv is not None and not pd.isna(sv) else ''
+
                 items.append(PriceItem(
                     vendor=vendor_normalized,
                     article=article_str,
                     description=description,
                     price=price_cleaned,
                     units=unit,
+                    storage=storage,
                 ))
 
             except Exception as e:
