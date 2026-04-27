@@ -1281,6 +1281,7 @@ async def shina_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _FILENAME_VENDOR_MAP = {
     'akel':  'AKEL',
     'shina': 'ШИНА',
+    'меко':  'МЕКО',
 }
 
 # Вендоры, которые принимают файл через бота (используется в подсказке)

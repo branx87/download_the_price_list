@@ -101,6 +101,9 @@ class VendorRegistry:
                 downloader_params={'download_dir': self.download_dir},
                 parser_config={
                     'engine': 'openpyxl',
+                    # Строки 5 и 6 (0-based) объединяются в заголовок, данные с строки 7
+                    'header_rows_combine': [5, 6],
+                    'data_start_row': 7,
                     'columns': {
                         'article': 'Артикул',
                         'description': 'Наименование',
@@ -140,6 +143,23 @@ class VendorRegistry:
                         'description': 'Наименование',
                         'price': 'Тариф с НДС, руб',
                         'units': 'Ед.'
+                    }
+                }
+            ),
+
+            # ========== МЕКО (загрузка файла вручную через бота) ==========
+            'МЕКО': VendorConfig(
+                name='МЕКО',
+                downloader_class=UploadDownloader,
+                downloader_params={},
+                parser_config={
+                    'engine': 'openpyxl',
+                    'sheet_name_pattern': 'Прайс',
+                    'header_row': 0,
+                    'columns': {
+                        'article': 'Артикул',
+                        'description': 'Наименование',
+                        'price': 'Цена с НДС, руб.',
                     }
                 }
             ),
