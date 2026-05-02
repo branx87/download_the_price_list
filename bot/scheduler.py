@@ -88,6 +88,16 @@ async def _job_erp_sync(context) -> None:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, service.sync_from_erp)
 
+        logger.info("[FIX] ERP-синхронизация завершена: added=%s, updated=%s, skipped=%s",
+                    result.added, result.updated, result.skipped_existing)
+
+        has_changes = result.added > 0 or result.updated > 0
+        logger.info("[FIX] Есть изменения: %s", has_changes)
+
+        if not has_changes:
+            logger.info("[SCHEDULER] Нет изменений в ERP — отчёт не отправлен")
+            return
+
         lines = [
             "📊 Автоматическая ERP-синхронизация:",
             f"📥 Получено: {result.total_received}",
@@ -105,7 +115,7 @@ async def _job_erp_sync(context) -> None:
                 lines.append(f"🔤 Нормализовано 'Цена по запросу': {normalized}")
 
         await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
-        logger.info("[SCHEDULER] ERP-синхронизация завершена: added=%s, linked=%s", result.added, result.updated)
+        logger.info("[SCHEDULER] Отчёт отправлен: added=%s, linked=%s", result.added, result.updated)
 
     except Exception as e:
         logger.error("[SCHEDULER] Ошибка ERP: %s", e, exc_info=True)
