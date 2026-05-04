@@ -1283,6 +1283,7 @@ _FILENAME_VENDOR_MAP = {
     'shina': 'ШИНА',
     'меко':  'МЕКО',
     'ао сэ': 'SE',
+    'sahat': 'SELECTRIC',
 }
 
 # Вендоры, которые принимают файл через бота (используется в подсказке)
@@ -1326,6 +1327,31 @@ async def _handle_shina_upload(update: Update, file_path):
     except Exception as e:
         logger.error("[SHINA] _handle_shina_upload: %s", e, exc_info=True)
         await msg.edit_text(f"❌ Ошибка загрузки ШИНА:\n{str(e)[:300]}")
+
+
+async def _handle_sahat_upload(update: Update, file_path):
+    """Загружает конфигурацию Selectric из Excel в selectric_mccb_config / selectric_acb_config."""
+    from adapters.parsers.sahat_parser import SahatParser
+    from domain.services.sahat_service import SahatService
+
+    msg = await update.message.reply_text("🔄 Загружаю конфигурацию Selectric (Sahat DDP)...")
+    try:
+        repository = SqlRepository(settings.DATABASE_URL)
+        service = SahatService(repository, SahatParser())
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, service.load_from_excel, file_path)
+
+        await msg.edit_text(
+            f"✅ <b>SELECTRIC</b> — конфигурация загружена!\n\n"
+            f"🔌 MCCB (литой корпус): {result['mccb_loaded']} позиций\n"
+            f"💨 ACB (воздушные): {result['acb_loaded']} позиций",
+            parse_mode='HTML',
+        )
+        logger.info("[SELECTRIC] upload: mccb=%d acb=%d", result['mccb_loaded'], result['acb_loaded'])
+    except Exception as e:
+        logger.error("[SELECTRIC] _handle_sahat_upload: %s", e, exc_info=True)
+        await msg.edit_text(f"❌ Ошибка загрузки SELECTRIC:\n{str(e)[:300]}")
 
 
 @admin_only
@@ -1376,6 +1402,11 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Специальный путь для ШИНА
         if vendor == 'ШИНА':
             await _handle_shina_upload(update, dest_path)
+            return
+
+        # Специальный путь для SELECTRIC (Sahat DDP)
+        if vendor == 'SELECTRIC':
+            await _handle_sahat_upload(update, dest_path)
             return
 
         # Создаём сервис синхронизации с UploadDownloader

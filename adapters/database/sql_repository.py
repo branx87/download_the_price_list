@@ -26,6 +26,7 @@ class SqlRepository(IRepository):
         if self.is_sqlite:
             self._apply_sqlite_pragmas()
         self._ensure_indexes()
+        self._ensure_selectric_tables()
         self.cleanup_none_strings()
         self.cleanup_whitespace()
 
@@ -81,6 +82,76 @@ class SqlRepository(IRepository):
                 logger.info(f"Индексы БД проверены/созданы ({len(indexes)} шт)")
         except Exception as e:
             logger.warning(f"Не удалось создать индексы: {e}")
+
+    def _ensure_selectric_tables(self):
+        """Создаёт selectric_mccb_config и selectric_acb_config если не существуют."""
+        try:
+            with self.SessionLocal() as session:
+                if self.is_sqlite:
+                    session.execute(text("""
+                        CREATE TABLE IF NOT EXISTS selectric_mccb_config (
+                            part_num     TEXT NOT NULL PRIMARY KEY,
+                            base_price   REAL,
+                            price_z      REAL, price_p      REAL, price_release REAL,
+                            price_aux    REAL, price_alm    REAL, price_shunt   REAL,
+                            price_uv     REAL, price_h      REAL, price_r       REAL,
+                            price_c      REAL,
+                            updated_at   TEXT
+                        )
+                    """))
+                    session.execute(text("""
+                        CREATE TABLE IF NOT EXISTS selectric_acb_config (
+                            part_num         TEXT NOT NULL PRIMARY KEY,
+                            base_price       REAL,
+                            price_basic      REAL, price_with_ctrl  REAL,
+                            price_sw3_a4     REAL, price_sw3_hp     REAL,
+                            price_sw3_hq     REAL, price_sw3_hg     REAL,
+                            price_horiz_2s   REAL, price_horiz_3s   REAL,
+                            price_vert_2l    REAL, price_vert_3l    REAL,
+                            price_lock1      REAL, price_lock2      REAL,
+                            price_lock3      REAL, price_lock5      REAL,
+                            price_modbus     REAL,
+                            updated_at       TEXT
+                        )
+                    """))
+                else:
+                    for table, ddl in [
+                        ('selectric_mccb_config', """
+                            CREATE TABLE selectric_mccb_config (
+                                part_num     NVARCHAR(150) NOT NULL PRIMARY KEY,
+                                base_price   FLOAT,
+                                price_z      FLOAT, price_p      FLOAT, price_release FLOAT,
+                                price_aux    FLOAT, price_alm    FLOAT, price_shunt   FLOAT,
+                                price_uv     FLOAT, price_h      FLOAT, price_r       FLOAT,
+                                price_c      FLOAT,
+                                updated_at   DATETIME
+                            )
+                        """),
+                        ('selectric_acb_config', """
+                            CREATE TABLE selectric_acb_config (
+                                part_num         NVARCHAR(150) NOT NULL PRIMARY KEY,
+                                base_price       FLOAT,
+                                price_basic      FLOAT, price_with_ctrl  FLOAT,
+                                price_sw3_a4     FLOAT, price_sw3_hp     FLOAT,
+                                price_sw3_hq     FLOAT, price_sw3_hg     FLOAT,
+                                price_horiz_2s   FLOAT, price_horiz_3s   FLOAT,
+                                price_vert_2l    FLOAT, price_vert_3l    FLOAT,
+                                price_lock1      FLOAT, price_lock2      FLOAT,
+                                price_lock3      FLOAT, price_lock5      FLOAT,
+                                price_modbus     FLOAT,
+                                updated_at       DATETIME
+                            )
+                        """),
+                    ]:
+                        exists = session.execute(text(
+                            "SELECT 1 FROM sys.objects WHERE type='U' AND name=:t"
+                        ), {'t': table}).fetchone()
+                        if not exists:
+                            session.execute(text(ddl))
+                session.commit()
+                logger.info("[SELECTRIC] таблицы проверены/созданы")
+        except Exception as e:
+            logger.warning("[SELECTRIC] Ошибка _ensure_selectric_tables: %s", e)
 
     def cleanup_none_strings(self):
         """Заменяет строки 'None' на пустые строки во всех текстовых полях.
@@ -1563,6 +1634,85 @@ class SqlRepository(IRepository):
 
         logger.info("[SHINA] recalculate_shina_to_total_price (sqlite): %d позиций", len(items))
         return len(items)
+
+    # ========== selectric_config ==========
+
+    def upsert_selectric_mccb(self, items: list) -> int:
+        """Batch upsert в selectric_mccb_config."""
+        if not items:
+            return 0
+        now = datetime.now()
+        cols = [
+            'part_num', 'base_price',
+            'price_z', 'price_p', 'price_release',
+            'price_aux', 'price_alm', 'price_shunt',
+            'price_uv', 'price_h', 'price_r', 'price_c',
+            'updated_at',
+        ]
+        data = [{**item, 'updated_at': now} for item in items]
+        self._upsert_selectric_table('selectric_mccb_config', cols, data)
+        logger.info("[SELECTRIC] upsert_mccb: %d записей", len(items))
+        return len(items)
+
+    def upsert_selectric_acb(self, items: list) -> int:
+        """Batch upsert в selectric_acb_config."""
+        if not items:
+            return 0
+        now = datetime.now()
+        cols = [
+            'part_num', 'base_price',
+            'price_basic', 'price_with_ctrl',
+            'price_sw3_a4', 'price_sw3_hp', 'price_sw3_hq', 'price_sw3_hg',
+            'price_horiz_2s', 'price_horiz_3s',
+            'price_vert_2l', 'price_vert_3l',
+            'price_lock1', 'price_lock2', 'price_lock3', 'price_lock5',
+            'price_modbus',
+            'updated_at',
+        ]
+        data = [{**item, 'updated_at': now} for item in items]
+        self._upsert_selectric_table('selectric_acb_config', cols, data)
+        logger.info("[SELECTRIC] upsert_acb: %d записей", len(items))
+        return len(items)
+
+    def _upsert_selectric_table(self, table: str, cols: list, data: list):
+        col_list = ', '.join(cols)
+        val_list = ', '.join(f":{c}" for c in cols)
+        if not self.is_sqlite:
+            non_pk = [c for c in cols if c != 'part_num']
+            src_cols = ', '.join(f":{c} AS {c}" for c in cols)
+            set_clause = ', '.join(f"target.{c} = source.{c}" for c in non_pk)
+            ins_vals = ', '.join(f"source.{c}" for c in cols)
+            with self.SessionLocal() as session:
+                try:
+                    for item in data:
+                        session.execute(text(f"""
+                            MERGE {table} AS target
+                            USING (SELECT {src_cols}) AS source ON target.part_num = source.part_num
+                            WHEN MATCHED THEN UPDATE SET {set_clause}
+                            WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({ins_vals});
+                        """), item)
+                    session.commit()
+                except Exception as e:
+                    logger.error("[SELECTRIC] upsert %s: %s", table, e, exc_info=True)
+                    session.rollback()
+                    raise
+        else:
+            with self.SessionLocal() as session:
+                for item in data:
+                    session.execute(text(
+                        f"INSERT OR REPLACE INTO {table} ({col_list}) VALUES ({val_list})"
+                    ), item)
+                session.commit()
+
+    def get_selectric_mccb_count(self) -> int:
+        with self.SessionLocal() as session:
+            row = session.execute(text("SELECT COUNT(*) FROM selectric_mccb_config")).fetchone()
+            return row[0] if row else 0
+
+    def get_selectric_acb_count(self) -> int:
+        with self.SessionLocal() as session:
+            row = session.execute(text("SELECT COUNT(*) FROM selectric_acb_config")).fetchone()
+            return row[0] if row else 0
 
     def backfill_vendor_for_filter(self, synonyms_map: dict) -> int:
         """Заполнить VendorForFilter для записей где он NULL или пустой"""
