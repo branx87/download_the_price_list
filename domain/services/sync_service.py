@@ -70,6 +70,11 @@ class SyncService:
             current_articles = {item.article for item in current_items}
             current_items_map = {item.article: item for item in current_items}
 
+            # Снятые с производства — не трогаем при синхронизации
+            discontinued_articles = self.repository.get_discontinued_articles(vendor)
+            if discontinued_articles:
+                logger.info("[DISCONTINUED] пропускаем при синхронизации: %d позиций", len(discontinued_articles))
+
             # 4. Анализируем изменения
             new_items_map = {item.article: item for item in new_items}
             new_articles = set(new_items_map.keys())
@@ -101,6 +106,13 @@ class SyncService:
             logger.info(f"📊 Статистика артикулов: БД={len(current_articles)}, "
                        f"Файл={len(new_articles)}, Исчезло={len(disappeared_articles)}")
 
+            # Исчезнувшие позиции — discontinued не трогаем
+            if discontinued_articles:
+                before = len(disappeared_articles)
+                disappeared_articles = [a for a in disappeared_articles if a not in discontinued_articles]
+                disappeared_items = [current_items_map[a] for a in disappeared_articles]
+                logger.debug("[DISCONTINUED] filtered disappeared: было %d стало %d", before, len(disappeared_articles))
+
             # Обновленные позиции (изменилась цена или описание, и новая цена > 0)
             to_update = []
             price_changes = []
@@ -130,6 +142,12 @@ class SyncService:
                 result.new_items = added
                 result.added_items = to_add
                 logger.info(f"➕ Добавлено новых: {added}")
+
+            # Discontinued — не обновляем цену/описание
+            if discontinued_articles and to_update:
+                before = len(to_update)
+                to_update = [item for item in to_update if item.article not in discontinued_articles]
+                logger.debug("[DISCONTINUED] filtered to_update: было %d стало %d", before, len(to_update))
 
             if to_update:
                 updated = self.repository.update_items(to_update, synonyms_map=synonyms_map)

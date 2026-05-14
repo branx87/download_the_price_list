@@ -1714,6 +1714,82 @@ class SqlRepository(IRepository):
             row = session.execute(text("SELECT COUNT(*) FROM selectric_acb_config")).fetchone()
             return row[0] if row else 0
 
+    # ========== discontinued ==========
+
+    def mark_as_discontinued(self, vendor: str, article: str, replacement: str = None) -> bool:
+        """Помечает позицию как снятую с производства. Возвращает True если запись найдена."""
+        params = {
+            'vendor': vendor,
+            'article': article,
+            'updated_at': datetime.now(),
+        }
+        if replacement:
+            query = text("""
+                UPDATE Total_Price
+                SET Status = 'discontinued', Storage = :replacement, updated_at = :updated_at
+                WHERE Vendor = :vendor AND Part_Num = :article
+            """)
+            params['replacement'] = replacement
+        else:
+            query = text("""
+                UPDATE Total_Price
+                SET Status = 'discontinued', updated_at = :updated_at
+                WHERE Vendor = :vendor AND Part_Num = :article
+            """)
+        with self.SessionLocal() as session:
+            result = session.execute(query, params)
+            session.commit()
+            ok = result.rowcount > 0
+        logger.info("[DISCONTINUED] mark: vendor=%s article=%s replacement=%s ok=%s",
+                    vendor, article, replacement, ok)
+        return ok
+
+    def unmark_discontinued(self, vendor: str, article: str) -> bool:
+        """Снимает пометку discontinued. Возвращает True если запись найдена."""
+        with self.SessionLocal() as session:
+            result = session.execute(text("""
+                UPDATE Total_Price
+                SET Status = 'active', updated_at = :updated_at
+                WHERE Status = 'discontinued' AND Vendor = :vendor AND Part_Num = :article
+            """), {'vendor': vendor, 'article': article, 'updated_at': datetime.now()})
+            session.commit()
+            ok = result.rowcount > 0
+        logger.info("[DISCONTINUED] unmark: vendor=%s article=%s ok=%s", vendor, article, ok)
+        return ok
+
+    def get_discontinued_articles(self, vendor: str) -> Set[str]:
+        """Возвращает множество артикулов со статусом discontinued для вендора."""
+        with self.SessionLocal() as session:
+            result = session.execute(text(f"""
+                SELECT Part_Num FROM Total_Price {self._nolock}
+                WHERE Status = 'discontinued' AND Vendor = :vendor
+            """), {'vendor': vendor})
+            articles = {row[0] for row in result}
+        logger.debug("[DISCONTINUED] get_discontinued_articles: vendor=%s count=%d", vendor, len(articles))
+        return articles
+
+    def get_discontinued_items(self, vendor: str = None) -> List[dict]:
+        """Возвращает список снятых с производства позиций."""
+        params = {}
+        vendor_clause = ""
+        if vendor:
+            vendor_clause = "AND Vendor = :vendor"
+            params['vendor'] = vendor
+        with self.SessionLocal() as session:
+            result = session.execute(text(f"""
+                SELECT Vendor, Part_Num, Descr, Storage, updated_at
+                FROM Total_Price {self._nolock}
+                WHERE Status = 'discontinued' {vendor_clause}
+                ORDER BY Vendor, Part_Num
+            """), params)
+            items = [
+                {'vendor': row[0], 'part_num': row[1], 'descr': row[2] or '',
+                 'storage': row[3] or '', 'updated_at': row[4]}
+                for row in result
+            ]
+        logger.info("[DISCONTINUED] get_discontinued_items: vendor=%s count=%d", vendor, len(items))
+        return items
+
     def backfill_vendor_for_filter(self, synonyms_map: dict) -> int:
         """Заполнить VendorForFilter для записей где он NULL или пустой"""
         total_updated = 0

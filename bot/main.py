@@ -36,8 +36,10 @@ from bot.handlers import (
     labor_command,
     labor_edit_command,
     shina_command,
+    discontinued_command,
     button_callback,
     upload_price_handler,
+    text_message_handler,
 )
 from bot.scheduler import register_jobs
 
@@ -163,8 +165,10 @@ async def main() -> None:
         app.add_handler(CommandHandler("labor", labor_command))
         app.add_handler(CommandHandler("labor_edit", labor_edit_command))
         app.add_handler(CommandHandler("shina", shina_command))
+        app.add_handler(CommandHandler("discontinued", discontinued_command))
         app.add_handler(CallbackQueryHandler(button_callback))
         app.add_handler(MessageHandler(filters.Document.ALL, upload_price_handler))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
         app.add_error_handler(error_handler)
 
         # Регистрируем периодические задачи
