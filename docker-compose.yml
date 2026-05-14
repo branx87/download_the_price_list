@@ -13,3 +13,19 @@ services:
       - ./price_files:/app/price_files
     environment:
       - TZ=Europe/Moscow
+
+  price-b24-bot:
+    build:
+      context: .
+      args:
+        - PROXY_URL
+    container_name: price-b24-bot
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "bitrix24_bot.main"]
+    ports:
+      - "7778:7778"
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      - TZ=Europe/Moscow
