@@ -100,6 +100,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /labor - Управление трудозатратами
 /labor_edit - Изменить значение трудозатрат
 /shina - Управление ценами шин (ШИНА)
+/discontinued - Снятые с производства
 /db_copy - Скопировать БД из MSSQL
 /status - Статус
 /debug - Показать ошибки
@@ -399,6 +400,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /labor - Управление таблицей трудозатрат
 /labor_edit <Category> <Value> - Изменить трудозатраты
 /shina - Цены шин: /shina медь 1400  или  /shina алюм 500
+/discontinued - Снятые с производства
 /db_copy - Скопировать БД из MSSQL
 /status - Статус синхронизаций
 /debug - Показать ошибки
@@ -774,6 +776,60 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=query.message.chat_id,
                 text=f"❌ Ошибка создания отчёта: {str(e)[:200]}"
             )
+        return
+
+    if query.data == 'disc_list_menu':
+        await query.edit_message_text(
+            "📋 Выберите вендора:", reply_markup=_disc_vendor_keyboard("disc_list_")
+        )
+        return
+
+    if query.data.startswith('disc_list_'):
+        vendor_key = query.data.replace('disc_list_', '')
+        vendor_filter = None if vendor_key == 'ALL' else vendor_key
+        try:
+            repository = SqlRepository(settings.DATABASE_URL)
+            items = repository.get_discontinued_items(vendor_filter)
+        except Exception as e:
+            logger.error("[DISCONTINUED] disc_list: %s", e, exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
+            return
+        if not items:
+            await query.edit_message_text(
+                "ℹ️ Снятых с производства не найдено.",
+                reply_markup=_disc_main_keyboard()
+            )
+            return
+        label = vendor_key if vendor_key != 'ALL' else 'ВСЕ'
+        lines = [f"📵 Снятые с производства [{label}]:\n"]
+        for item in items[:_DISC_PAGE_SIZE]:
+            replacement = f" (→ {item['storage']})" if item['storage'] else ""
+            lines.append(f"• {item['vendor']} | {item['part_num']}{replacement}")
+        if len(items) > _DISC_PAGE_SIZE:
+            lines.append(f"\n... и ещё {len(items) - _DISC_PAGE_SIZE}")
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:3900] + "\n..."
+        await query.edit_message_text(text, reply_markup=_disc_main_keyboard())
+        return
+
+    if query.data == 'disc_mark_start':
+        context.user_data['disc_state'] = 'awaiting_mark'
+        await query.edit_message_text(
+            "✅ Введите: <b>VENDOR ARTICLE [REPLACEMENT]</b>\n\n"
+            "Пример: <code>KEAZ ABC123</code>\n"
+            "С заменой: <code>KEAZ ABC123 XYZ456</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    if query.data == 'disc_unmark_start':
+        context.user_data['disc_state'] = 'awaiting_unmark'
+        await query.edit_message_text(
+            "↩️ Введите: <b>VENDOR ARTICLE</b>\n\n"
+            "Пример: <code>KEAZ ABC123</code>",
+            parse_mode='HTML'
+        )
         return
 
     if query.data.startswith('check_'):
@@ -1454,3 +1510,107 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error("[FIX] upload_price_handler: ошибка vendor=%s: %s", vendor, e, exc_info=True)
         await update.message.reply_text(f"❌ Ошибка при синхронизации <b>{vendor}</b>:\n{str(e)[:300]}", parse_mode='HTML')
+
+
+# ─── Снятые с производства (/discontinued) ────────────────────────────────────
+
+_DISC_VENDORS = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
+_DISC_PAGE_SIZE = 20
+
+
+def _disc_main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Список снятых", callback_data="disc_list_menu")],
+        [InlineKeyboardButton("✅ Пометить как снятый", callback_data="disc_mark_start")],
+        [InlineKeyboardButton("↩️ Снять пометку", callback_data="disc_unmark_start")],
+    ])
+
+
+def _disc_vendor_keyboard(prefix: str):
+    buttons = [
+        [InlineKeyboardButton(v, callback_data=f"{prefix}{v}")]
+        for v in _DISC_VENDORS
+    ]
+    buttons.append([InlineKeyboardButton("ВСЕ", callback_data=f"{prefix}ALL")])
+    return InlineKeyboardMarkup(buttons)
+
+
+@admin_only
+async def discontinued_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /discontinued — управление снятыми с производства позициями."""
+    logger.info("[DISCONTINUED] /discontinued: user=%s", update.effective_user.id)
+    await update.message.reply_text(
+        "📵 <b>Снятые с производства</b>\n\nВыберите действие:",
+        parse_mode='HTML',
+        reply_markup=_disc_main_keyboard(),
+    )
+
+
+async def _handle_disc_mark_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает текстовый ввод для пометки позиции как discontinued."""
+    text = update.message.text.strip()
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "⚠️ Укажите: VENDOR ARTICLE [REPLACEMENT]\nПример: KEAZ ABC123 XYZ456"
+        )
+        return
+    vendor, article = parts[0].upper(), parts[1]
+    replacement = parts[2] if len(parts) >= 3 else None
+    context.user_data.pop('disc_state', None)
+    try:
+        repository = SqlRepository(settings.DATABASE_URL)
+        ok = repository.mark_as_discontinued(vendor, article, replacement)
+        if ok:
+            msg = f"✅ <b>{vendor} | {article}</b> помечен как снятый с производства."
+            if replacement:
+                msg += f"\n🔄 Замена: {replacement}"
+        else:
+            msg = f"⚠️ Позиция <b>{vendor} | {article}</b> не найдена в БД."
+        logger.info("[DISCONTINUED] mark via TG: vendor=%s article=%s replacement=%s ok=%s",
+                    vendor, article, replacement, ok)
+    except Exception as e:
+        logger.error("[DISCONTINUED] _handle_disc_mark_input: %s", e, exc_info=True)
+        msg = f"❌ Ошибка: {str(e)[:200]}"
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=_disc_main_keyboard())
+
+
+async def _handle_disc_unmark_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает текстовый ввод для снятия пометки discontinued."""
+    text = update.message.text.strip()
+    parts = text.split()
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "⚠️ Укажите: VENDOR ARTICLE\nПример: KEAZ ABC123"
+        )
+        return
+    vendor, article = parts[0].upper(), parts[1]
+    context.user_data.pop('disc_state', None)
+    try:
+        repository = SqlRepository(settings.DATABASE_URL)
+        ok = repository.unmark_discontinued(vendor, article)
+        msg = (
+            f"✅ <b>{vendor} | {article}</b> — пометка снята, статус active."
+            if ok else
+            f"⚠️ Позиция <b>{vendor} | {article}</b> не найдена или уже не discontinued."
+        )
+        logger.info("[DISCONTINUED] unmark via TG: vendor=%s article=%s ok=%s", vendor, article, ok)
+    except Exception as e:
+        logger.error("[DISCONTINUED] _handle_disc_unmark_input: %s", e, exc_info=True)
+        msg = f"❌ Ошибка: {str(e)[:200]}"
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=_disc_main_keyboard())
+
+
+async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений — обслуживает состояния диалогов."""
+    admin_ids = settings.ADMIN_IDS
+    if admin_ids and update.effective_user.id not in admin_ids:
+        return
+
+    disc_state = context.user_data.get('disc_state')
+    if disc_state == 'awaiting_mark':
+        await _handle_disc_mark_input(update, context)
+        return
+    if disc_state == 'awaiting_unmark':
+        await _handle_disc_unmark_input(update, context)
+        return

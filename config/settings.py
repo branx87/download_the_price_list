@@ -103,6 +103,26 @@ class Settings:
             return time(int(raw), 0)
         return None
 
+    # --- Bitrix24 Bot ---
+    # REST webhook URL (https://your.bitrix24.ru/rest/<user_id>/<token>/)
+    BITRIX_REST_URL = os.getenv('BITRIX_REST_URL', '')
+    # ID бота (из imbot.register или настроек)
+    BITRIX_BOT_ID = int(os.getenv('BITRIX_BOT_ID', '0') or '0')
+    # Порт FastAPI-сервера для приёма webhook от PHP-relay
+    B24_BOT_PORT = int(os.getenv('B24_BOT_PORT', '7778') or '7778')
+    # Токен для проверки X-Webhook-Token заголовка от PHP-relay
+    B24_WEBHOOK_TOKEN = os.getenv('B24_WEBHOOK_TOKEN', '')
+    # ID группового чата для отправки алертов (например: chat22191)
+    BITRIX_ALERT_CHAT_ID = os.getenv('BITRIX_ALERT_CHAT_ID', '')
+
+    # Список Bitrix24 user ID, которым разрешено использовать бота
+    @property
+    def B24_ADMIN_IDS(self) -> set[int]:
+        raw = os.getenv('B24_ADMIN_IDS', '')
+        if not raw:
+            return set()
+        return {int(x.strip()) for x in raw.split(',') if x.strip().isdigit()}
+
     # Путь к Python из виртуального окружения
     @property
     def PYTHON_PATH(self):

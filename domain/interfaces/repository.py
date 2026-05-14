@@ -4,6 +4,7 @@ from datetime import datetime
 from domain.entities.price_item import PriceItem
 
 
+
 class IRepository(ABC):
     """Интерфейс для работы с хранилищем данных"""
 
@@ -51,3 +52,7 @@ class IRepository(ABC):
     def reset_changed_status(self, vendor: str) -> int:
         """Сбросить статус price_changed на active после синхронизации"""
         pass
+
+    def get_discontinued_articles(self, vendor: str) -> Set[str]:
+        """Артикулы со статусом discontinued. Дефолт: пустое множество."""
+        return set()
