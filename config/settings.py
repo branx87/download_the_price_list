@@ -110,8 +110,8 @@ class Settings:
     BITRIX_BOT_ID = int(os.getenv('BITRIX_BOT_ID', '0') or '0')
     # Порт FastAPI-сервера для приёма webhook от PHP-relay
     B24_BOT_PORT = int(os.getenv('B24_BOT_PORT', '7778') or '7778')
-    # Токен для проверки X-Webhook-Token заголовка от PHP-relay
-    B24_WEBHOOK_TOKEN = os.getenv('FASTAPI_WEBHOOK_TOKEN', '')
+    # Токен для исходящих запросов Python→PHP bot_message_sender.php
+    B24_WEBHOOK_TOKEN = os.getenv('B24_WEBHOOK_TOKEN', '') or os.getenv('FASTAPI_WEBHOOK_TOKEN', '')
     # ID группового чата для отправки алертов (например: chat22191)
     BITRIX_ALERT_CHAT_ID = os.getenv('BITRIX_ALERT_CHAT_ID', '')
     # PHP-эндпоинт для отправки сообщений от имени бота (обходит 403 у imbot.message.add)
