@@ -11,7 +11,7 @@ PHP-relay отправляет ответ пользователю через Bi
 
 .env переменные (см. .env.example):
   B24_BOT_PORT     — порт сервера (по умолчанию 7778)
-  B24_WEBHOOK_TOKEN — токен для проверки X-Webhook-Token заголовка
+  FASTAPI_WEBHOOK_TOKEN — токен для проверки X-Webhook-Token заголовка
 """
 import logging
 import os
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Price Sync B24 Bot", docs_url=None, redoc_url=None)
 
-_webhook_token = os.getenv("B24_WEBHOOK_TOKEN", "")
+_webhook_token = os.getenv("FASTAPI_WEBHOOK_TOKEN", "")
 
 
 def _check_token(request: Request) -> bool:
