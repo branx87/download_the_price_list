@@ -66,7 +66,7 @@ class BitrixBotAPI:
                         logger.warning("[BitrixBotAPI] PHP sender: не JSON (%s chars): %s", len(body), body[:200])
                         return False
                     if data.get("ok"):
-                        logger.debug("[BitrixBotAPI] PHP sender OK dialog=%s", dialog_id)
+                        logger.info("[BitrixBotAPI] PHP sender OK dialog=%s msg_id=%s", dialog_id, data.get("message_id"))
                         return True
                     logger.warning("[BitrixBotAPI] PHP sender error: %s", data.get("error", data))
                     return False
