@@ -36,10 +36,11 @@ class BitrixBotAPI:
         dialog_id: str,
         text: str,
         keyboard: Optional[list] = None,
+        replace: bool = False,
     ) -> bool:
         """Отправить сообщение от имени бота. PHP-эндпоинт имеет приоритет над REST API."""
         if self._php_sender_url:
-            return await self._send_via_php(dialog_id, text, keyboard)
+            return await self._send_via_php(dialog_id, text, keyboard, replace)
         return await self._send_via_rest(dialog_id, text, keyboard)
 
     async def _send_via_php(
@@ -47,11 +48,14 @@ class BitrixBotAPI:
         dialog_id: str,
         text: str,
         keyboard: Optional[list] = None,
+        replace: bool = False,
     ) -> bool:
         """Отправить через PHP-эндпоинт (обходит ограничение CLIENT_ID у imbot.message.add)."""
         payload: dict = {"bot_id": self._bot_id, "dialog_id": dialog_id, "message": text}
         if keyboard is not None:
             payload["keyboard"] = keyboard
+        if replace:
+            payload["replace"] = True
         headers = {}
         if self._php_sender_token:
             headers["X-Webhook-Token"] = self._php_sender_token

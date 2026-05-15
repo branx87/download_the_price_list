@@ -63,10 +63,12 @@ KB_CHECK = _vendor_kb("check")
 # Message builder
 # ------------------------------------------------------------------
 
-def _msg(text: str, keyboard: Optional[list] = None) -> dict:
+def _msg(text: str, keyboard: Optional[list] = None, replace: bool = False) -> dict:
     m: dict = {"text": text}
     if keyboard is not None:
         m["keyboard"] = keyboard
+    if replace:
+        m["replace"] = True
     return m
 
 
@@ -136,19 +138,19 @@ async def handle_message(
 
     if raw == "sync_all":
         asyncio.create_task(_run_sync_all(dialog_id))
-        return [_msg("⏳ Запускаю синхронизацию всех вендоров...\nРезультат придёт сюда после завершения.")]
+        return [_msg("⏳ Запускаю синхронизацию всех вендоров...\nРезультат придёт сюда после завершения.", replace=True)]
 
     if raw.startswith("sync_"):
         vendor = raw[5:].upper()
         if vendor in AUTO_VENDORS:
             asyncio.create_task(_run_sync_vendor(vendor, dialog_id))
-            return [_msg(f"⏳ Запускаю синхронизацию [B]{vendor}[/B]...\nРезультат придёт сюда после завершения.")]
+            return [_msg(f"⏳ Запускаю синхронизацию [B]{vendor}[/B]...\nРезультат придёт сюда после завершения.", replace=True)]
 
     if raw.startswith("check_"):
         vendor = raw[6:].upper()
         if vendor in AUTO_VENDORS:
             asyncio.create_task(_run_check_vendor(vendor, dialog_id))
-            return [_msg(f"⏳ Запускаю проверку [B]{vendor}[/B]...\nРезультат придёт сюда после завершения.")]
+            return [_msg(f"⏳ Запускаю проверку [B]{vendor}[/B]...\nРезультат придёт сюда после завершения.", replace=True)]
 
     return [_msg(_help_text(), keyboard=KB_MAIN)]
 
@@ -208,11 +210,11 @@ async def _run_sync_vendor(vendor: str, dialog_id: str) -> None:
             text = f"❌ [B]{vendor}[/B]: ошибка — {result.error_message}"
 
         logger.info("[B24Bot] sync %s done: %s", vendor, result)
-        await api.send_message(dialog_id, text, keyboard=KB_MAIN)
+        await api.send_message(dialog_id, text, keyboard=KB_MAIN, replace=True)
 
     except Exception as e:
         logger.error("[B24Bot] _run_sync_vendor %s: %s", vendor, e, exc_info=True)
-        await api.send_message(dialog_id, f"❌ Ошибка синхронизации [B]{vendor}[/B]: {e}")
+        await api.send_message(dialog_id, f"❌ Ошибка синхронизации [B]{vendor}[/B]: {e}", replace=True)
 
 
 # ------------------------------------------------------------------
@@ -249,7 +251,7 @@ async def _run_sync_all(dialog_id: str) -> None:
         else:
             lines.append(f"❌ {vendor}: {result.error_message}")
 
-    await api.send_message(dialog_id, "\n".join(lines), keyboard=KB_MAIN)
+    await api.send_message(dialog_id, "\n".join(lines), keyboard=KB_MAIN, replace=True)
 
 
 # ------------------------------------------------------------------
@@ -267,11 +269,11 @@ async def _run_check_vendor(vendor: str, dialog_id: str) -> None:
         result = await loop.run_in_executor(None, _check)
         text = _format_check_result(vendor, result)
         logger.info("[B24Bot] check %s done: changes=%s", vendor, result.has_changes)
-        await api.send_message(dialog_id, text, keyboard=KB_MAIN)
+        await api.send_message(dialog_id, text, keyboard=KB_MAIN, replace=True)
 
     except Exception as e:
         logger.error("[B24Bot] _run_check_vendor %s: %s", vendor, e, exc_info=True)
-        await api.send_message(dialog_id, f"❌ Ошибка проверки [B]{vendor}[/B]: {e}")
+        await api.send_message(dialog_id, f"❌ Ошибка проверки [B]{vendor}[/B]: {e}", replace=True)
 
 
 def _format_check_result(vendor: str, result) -> str:
