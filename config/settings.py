@@ -114,6 +114,9 @@ class Settings:
     B24_WEBHOOK_TOKEN = os.getenv('B24_WEBHOOK_TOKEN', '')
     # ID группового чата для отправки алертов (например: chat22191)
     BITRIX_ALERT_CHAT_ID = os.getenv('BITRIX_ALERT_CHAT_ID', '')
+    # PHP-эндпоинт для отправки сообщений от имени бота (обходит 403 у imbot.message.add)
+    # Пример: http://192.168.10.12/local/ajax/bot_message_sender.php
+    BITRIX_BOT_SENDER_URL = os.getenv('BITRIX_BOT_SENDER_URL', '')
 
     # Список Bitrix24 user ID, которым разрешено использовать бота
     @property

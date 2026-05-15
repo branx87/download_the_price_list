@@ -1,6 +1,6 @@
 """
 Bitrix24 REST API client.
-BitrixBotAPI — отправляет сообщения через imbot.message.add / im.message.add.
+BitrixBotAPI — отправляет сообщения через PHP-эндпоинт (приоритет) или imbot.message.add.
 BitrixAlerter — шлёт уведомления в фиксированный групповой чат.
 """
 import logging
@@ -13,15 +13,23 @@ logger = logging.getLogger(__name__)
 
 
 class BitrixBotAPI:
-    """Отправляет сообщения в мессенджер Bitrix24 через REST API."""
+    """Отправляет сообщения в мессенджер Bitrix24."""
 
-    def __init__(self, rest_url: str, bot_id: int):
+    def __init__(
+        self,
+        rest_url: str,
+        bot_id: int,
+        php_sender_url: str = "",
+        php_sender_token: str = "",
+    ):
         self._rest_url = rest_url.rstrip("/")
         self._bot_id = bot_id
+        self._php_sender_url = php_sender_url
+        self._php_sender_token = php_sender_token
 
     @property
     def is_configured(self) -> bool:
-        return bool(self._rest_url and self._bot_id)
+        return bool((self._rest_url or self._php_sender_url) and self._bot_id)
 
     async def send_message(
         self,
@@ -29,20 +37,54 @@ class BitrixBotAPI:
         text: str,
         keyboard: Optional[list] = None,
     ) -> bool:
-        """Отправить сообщение от имени бота через imbot.message.add."""
-        if not self.is_configured:
-            logger.warning("[BitrixBotAPI] Не настроен (нет BITRIX_REST_URL или BITRIX_BOT_ID)")
+        """Отправить сообщение от имени бота. PHP-эндпоинт имеет приоритет над REST API."""
+        if self._php_sender_url:
+            return await self._send_via_php(dialog_id, text, keyboard)
+        return await self._send_via_rest(dialog_id, text, keyboard)
+
+    async def _send_via_php(
+        self,
+        dialog_id: str,
+        text: str,
+        keyboard: Optional[list] = None,
+    ) -> bool:
+        """Отправить через PHP-эндпоинт (обходит ограничение CLIENT_ID у imbot.message.add)."""
+        payload: dict = {"bot_id": self._bot_id, "dialog_id": dialog_id, "message": text}
+        if keyboard is not None:
+            payload["keyboard"] = keyboard
+        headers = {}
+        if self._php_sender_token:
+            headers["X-Webhook-Token"] = self._php_sender_token
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(self._php_sender_url, json=payload, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("ok"):
+                        logger.debug("[BitrixBotAPI] PHP sender OK dialog=%s", dialog_id)
+                        return True
+                    logger.warning("[BitrixBotAPI] PHP sender error: %s", data.get("error", data))
+                    return False
+                logger.warning("[BitrixBotAPI] PHP sender HTTP %s: %s", resp.status_code, resp.text[:200])
+                return False
+        except Exception as e:
+            logger.error("[BitrixBotAPI] _send_via_php ошибка: %s", e)
             return False
 
+    async def _send_via_rest(
+        self,
+        dialog_id: str,
+        text: str,
+        keyboard: Optional[list] = None,
+    ) -> bool:
+        """Отправить через imbot.message.add REST API."""
+        if not self._rest_url:
+            logger.warning("[BitrixBotAPI] Не настроен (нет BITRIX_REST_URL и BITRIX_BOT_SENDER_URL)")
+            return False
         url = f"{self._rest_url}/imbot.message.add.json"
-        payload: dict = {
-            "BOT_ID": self._bot_id,
-            "DIALOG_ID": dialog_id,
-            "MESSAGE": text,
-        }
+        payload: dict = {"BOT_ID": self._bot_id, "DIALOG_ID": dialog_id, "MESSAGE": text}
         if keyboard is not None:
             payload["KEYBOARD"] = keyboard
-
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(url, json=payload)

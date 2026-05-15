@@ -97,7 +97,12 @@ def _create_sync_service(vendor: str) -> SyncService:
 
 
 def _get_api() -> BitrixBotAPI:
-    return BitrixBotAPI(settings.BITRIX_REST_URL, settings.BITRIX_BOT_ID)
+    return BitrixBotAPI(
+        settings.BITRIX_REST_URL,
+        settings.BITRIX_BOT_ID,
+        php_sender_url=settings.BITRIX_BOT_SENDER_URL,
+        php_sender_token=settings.B24_WEBHOOK_TOKEN,
+    )
 
 
 # ------------------------------------------------------------------
