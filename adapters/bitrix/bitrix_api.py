@@ -58,14 +58,19 @@ class BitrixBotAPI:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(self._php_sender_url, json=payload, headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json()
+                body = resp.text.strip()
+                if resp.status_code == 200 and body:
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        logger.warning("[BitrixBotAPI] PHP sender: не JSON (%s chars): %s", len(body), body[:200])
+                        return False
                     if data.get("ok"):
                         logger.debug("[BitrixBotAPI] PHP sender OK dialog=%s", dialog_id)
                         return True
                     logger.warning("[BitrixBotAPI] PHP sender error: %s", data.get("error", data))
                     return False
-                logger.warning("[BitrixBotAPI] PHP sender HTTP %s: %s", resp.status_code, resp.text[:200])
+                logger.warning("[BitrixBotAPI] PHP sender HTTP %s пустое тело — файл не задеплоен? body=%r", resp.status_code, body[:100])
                 return False
         except Exception as e:
             logger.error("[BitrixBotAPI] _send_via_php ошибка: %s", e)
