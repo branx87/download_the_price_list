@@ -401,6 +401,7 @@ class SqlRepository(IRepository):
                         FROM Total_Price tp
                         INNER JOIN #tmp_price_upd t
                             ON tp.Vendor = t.Vendor AND tp.Part_Num = t.Part_Num
+                        WHERE tp.Status != 'discontinued'
                     """))
                     affected = result.rowcount
                     connection.execute(text("DROP TABLE #tmp_price_upd"))
@@ -426,7 +427,7 @@ class SqlRepository(IRepository):
                     VendorForFilter = :vendor_for_filter,
                     Status = 'price_changed',
                     updated_at = :updated_at
-                WHERE Vendor = :vendor AND Part_Num = :article
+                WHERE Vendor = :vendor AND Part_Num = :article AND Status != 'discontinued'
             """)
             updated_count = 0
             batch_size = 500
@@ -1749,14 +1750,16 @@ class SqlRepository(IRepository):
         if replacement:
             query = text("""
                 UPDATE Total_Price
-                SET Status = 'discontinued', Storage = :replacement, updated_at = :updated_at
+                SET Status = 'discontinued', Storage = :replacement,
+                    PriceText = 'Снят с производства', updated_at = :updated_at
                 WHERE Vendor = :vendor AND Part_Num = :article
             """)
             params['replacement'] = replacement
         else:
             query = text("""
                 UPDATE Total_Price
-                SET Status = 'discontinued', updated_at = :updated_at
+                SET Status = 'discontinued', PriceText = 'Снят с производства',
+                    updated_at = :updated_at
                 WHERE Vendor = :vendor AND Part_Num = :article
             """)
         with self.SessionLocal() as session:
@@ -1772,7 +1775,7 @@ class SqlRepository(IRepository):
         with self.SessionLocal() as session:
             result = session.execute(text("""
                 UPDATE Total_Price
-                SET Status = 'active', updated_at = :updated_at
+                SET Status = 'active', PriceText = '', updated_at = :updated_at
                 WHERE Status = 'discontinued' AND Vendor = :vendor AND Part_Num = :article
             """), {'vendor': vendor, 'article': article, 'updated_at': datetime.now()})
             session.commit()
