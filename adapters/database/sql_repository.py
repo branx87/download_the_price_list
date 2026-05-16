@@ -401,7 +401,7 @@ class SqlRepository(IRepository):
                         FROM Total_Price tp
                         INNER JOIN #tmp_price_upd t
                             ON tp.Vendor = t.Vendor AND tp.Part_Num = t.Part_Num
-                        WHERE tp.Status != 'discontinued'
+                        WHERE (tp.Status IS NULL OR tp.Status != 'discontinued')
                     """))
                     affected = result.rowcount
                     connection.execute(text("DROP TABLE #tmp_price_upd"))
@@ -427,7 +427,7 @@ class SqlRepository(IRepository):
                     VendorForFilter = :vendor_for_filter,
                     Status = 'price_changed',
                     updated_at = :updated_at
-                WHERE Vendor = :vendor AND Part_Num = :article AND Status != 'discontinued'
+                WHERE Vendor = :vendor AND Part_Num = :article AND (Status IS NULL OR Status != 'discontinued')
             """)
             updated_count = 0
             batch_size = 500
