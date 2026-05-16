@@ -123,7 +123,10 @@ async def handle_message(
     command: str = "",
     command_params: str = "",
 ) -> list[dict]:
+    is_group = dialog_id.startswith("chat")
     if not _is_admin(from_user_id):
+        if is_group:
+            return []  # в группе молчим — не засоряем чат
         logger.warning("[B24Bot] Отказ в доступе user_id=%s", from_user_id)
         return [_msg("⛔ Доступ запрещён.")]
 
