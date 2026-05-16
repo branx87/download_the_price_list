@@ -252,7 +252,6 @@ class SqlRepository(IRepository):
 
     def get_items_by_vendor(self, vendor: str) -> List[PriceItem]:
         """Получить все позиции вендора"""
-        # Нормализуем vendor name для поиска
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
 
         with self.SessionLocal() as session:
@@ -262,17 +261,20 @@ class SqlRepository(IRepository):
                 WHERE Vendor = :vendor AND (Status IS NULL OR Status != 'disappeared')
             """)
 
+            t0 = time.time()
             result = session.execute(query, {'vendor': vendor_normalized})
+            rows = result.fetchall()
+            t1 = time.time()
+            logger.info("[PERF] get_items_by_vendor SQL: vendor=%s rows=%d time=%.2fs", vendor_normalized, len(rows), t1 - t0)
 
             items = []
-            for row in result:
+            for row in rows:
                 try:
-                    # Нормализуем данные при чтении из БД
                     article_normalized = self.data_normalizer.normalize_article(row[1], vendor_normalized)
                     unit_normalized = self.data_normalizer.normalize_unit(row[4] if row[4] else 'шт')
 
                     item = PriceItem(
-                        vendor=vendor_normalized,  # Всегда возвращаем нормализованное имя
+                        vendor=vendor_normalized,
                         article=article_normalized,
                         description=row[2] or "",
                         price=Decimal(str(row[3])) if row[3] else Decimal('0'),
@@ -282,6 +284,9 @@ class SqlRepository(IRepository):
                     items.append(item)
                 except Exception as e:
                     logger.warning(f"Пропущена запись: {e}")
+
+            t2 = time.time()
+            logger.info("[PERF] get_items_by_vendor normalize: vendor=%s items=%d time=%.2fs", vendor_normalized, len(items), t2 - t1)
 
             return items
 
