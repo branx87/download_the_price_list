@@ -1751,14 +1751,14 @@ class SqlRepository(IRepository):
             query = text("""
                 UPDATE Total_Price
                 SET Status = 'discontinued', Storage = :replacement,
-                    PriceText = 'Снят с производства', updated_at = :updated_at
+                    Price = 0, PriceText = 'Снят с производства', updated_at = :updated_at
                 WHERE Vendor = :vendor AND Part_Num = :article
             """)
             params['replacement'] = replacement
         else:
             query = text("""
                 UPDATE Total_Price
-                SET Status = 'discontinued', PriceText = 'Снят с производства',
+                SET Status = 'discontinued', Price = 0, PriceText = 'Снят с производства',
                     updated_at = :updated_at
                 WHERE Vendor = :vendor AND Part_Num = :article
             """)
