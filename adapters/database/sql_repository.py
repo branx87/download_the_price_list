@@ -27,8 +27,6 @@ class SqlRepository(IRepository):
             self._apply_sqlite_pragmas()
         self._ensure_indexes()
         self._ensure_selectric_tables()
-        self.cleanup_none_strings()
-        self.cleanup_whitespace()
 
     def _apply_sqlite_pragmas(self):
         """Оптимизация SQLite для быстрой записи"""
