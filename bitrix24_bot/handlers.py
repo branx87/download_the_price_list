@@ -25,6 +25,7 @@ from adapters.database.sql_repository import SqlRepository
 from domain.services.sync_service import SyncService
 from domain.services.report_service import ReportService
 from domain.services.data_normalizer import DataNormalizer
+from domain.services.shina_service import ShinaService, MATERIAL_ALIASES
 from adapters.bitrix.bitrix_api import BitrixBotAPI
 
 logger = logging.getLogger(__name__)
@@ -55,10 +56,12 @@ def _vendor_kb(prefix: str) -> list:
 KB_MAIN = [
     [_btn("📊 Статус", "статус"), _btn("🔄 Синхронизировать", "синхронизировать")],
     [_btn("🔍 Проверить", "проверить"), _btn("🔄 Все вендоры", "sync_all")],
+    [_btn("⚡ Шина", "шина"), _btn("🚫 Снятые", "снятые")],
 ]
 
 KB_SYNC = _vendor_kb("sync")
 KB_CHECK = _vendor_kb("check")
+KB_DISC = _vendor_kb("снят")
 
 
 # ------------------------------------------------------------------
@@ -141,6 +144,32 @@ async def handle_message(
     if raw == "sync_all":
         asyncio.create_task(_run_sync_all(dialog_id))
         return [_msg("⏳ Запускаю синхронизацию всех вендоров...\nРезультат придёт сюда после завершения.", replace=True)]
+
+    if raw == "шина":
+        return await _do_shina()
+
+    if raw.startswith("шина "):
+        return await _do_shina_update(raw[5:].strip())
+
+    if raw == "снятые":
+        return [_msg(
+            "Снятые с производства:\n"
+            "• Выберите вендора для просмотра списка\n"
+            "• Пометить: [B]пометить VENDOR АРТИКУЛ[/B] (с заменой: пометить VENDOR АРТИКУЛ ЗАМЕНА)\n"
+            "• Снять пометку: [B]восстановить VENDOR АРТИКУЛ[/B]",
+            keyboard=KB_DISC,
+        )]
+
+    if raw.startswith("снят_"):
+        vendor = raw[5:].upper()
+        if vendor in AUTO_VENDORS:
+            return await _do_disc_list(vendor)
+
+    if raw.startswith("пометить "):
+        return await _do_disc_mark(raw[9:].strip())
+
+    if raw.startswith("восстановить "):
+        return await _do_disc_unmark(raw[13:].strip())
 
     if raw.startswith("sync_"):
         vendor = raw[5:].upper()
@@ -309,6 +338,163 @@ def _format_check_result(vendor: str, result) -> str:
 
 
 # ------------------------------------------------------------------
+# Shina (cable bus prices)
+# ------------------------------------------------------------------
+
+async def _do_shina() -> list[dict]:
+    loop = asyncio.get_event_loop()
+
+    def _fetch() -> tuple:
+        service = ShinaService(SqlRepository(settings.DATABASE_URL), parser=None)
+        return service.get_current_prices(), service.get_config_count()
+
+    try:
+        prices, count = await loop.run_in_executor(None, _fetch)
+        copper = prices.get('медь', '—')
+        alum = prices.get('алюм', '—')
+        text = (
+            f"[B]Цены шин (ШИНА):[/B]\n\n"
+            f"🔴 Медь: {copper} руб/кг\n"
+            f"⚪ Алюминий: {alum} руб/кг\n\n"
+            f"📦 Позиций в конфиге: {count}\n\n"
+            f"Обновить: [B]шина медь 1400[/B]  или  [B]шина алюм 500[/B]"
+        )
+    except Exception as e:
+        logger.error("[B24Bot] _do_shina error: %s", e, exc_info=True)
+        text = f"❌ Ошибка получения цен шин: {e}"
+
+    return [_msg(text, keyboard=KB_MAIN)]
+
+
+async def _do_shina_update(args: str) -> list[dict]:
+    parts = args.split()
+    if len(parts) < 2:
+        return [_msg("Формат: [B]шина медь 1400[/B]  или  [B]шина алюм 500[/B]", keyboard=KB_MAIN)]
+
+    material_input = parts[0]
+    try:
+        price = float(parts[1].replace(',', '.'))
+    except ValueError:
+        return [_msg(f"❌ Неверная цена: {parts[1]}", keyboard=KB_MAIN)]
+
+    if MATERIAL_ALIASES.get(material_input.lower()) is None:
+        return [_msg(f"❌ Неизвестный материал: [B]{material_input}[/B]. Допустимые: медь, алюм", keyboard=KB_MAIN)]
+
+    loop = asyncio.get_event_loop()
+
+    def _update() -> int:
+        service = ShinaService(SqlRepository(settings.DATABASE_URL), parser=None)
+        return service.update_price(material_input, price)
+
+    try:
+        updated = await loop.run_in_executor(None, _update)
+        if updated == 0:
+            text = f"⚠️ Материал [B]{material_input}[/B] не найден в конфиге шин (загрузите Excel-файл сначала)"
+        else:
+            material_norm = MATERIAL_ALIASES[material_input.lower()]
+            label = "Медь" if material_norm == 'медь' else "Алюминий"
+            text = f"✅ [B]{label}[/B]: {price:.0f} руб/кг, пересчитано {updated} поз."
+    except Exception as e:
+        logger.error("[B24Bot] _do_shina_update error: %s", e, exc_info=True)
+        text = f"❌ Ошибка обновления цены шин: {e}"
+
+    return [_msg(text, keyboard=KB_MAIN)]
+
+
+# ------------------------------------------------------------------
+# Discontinued products
+# ------------------------------------------------------------------
+
+async def _do_disc_list(vendor: str) -> list[dict]:
+    loop = asyncio.get_event_loop()
+
+    def _fetch() -> list:
+        repo = SqlRepository(settings.DATABASE_URL)
+        return repo.get_discontinued_items(vendor)
+
+    try:
+        items = await loop.run_in_executor(None, _fetch)
+        if not items:
+            text = f"✅ [B]{vendor}[/B]: снятых с производства нет"
+        else:
+            lines = [f"[B]{vendor}[/B]: снято с производства — {len(items)} поз.\n"]
+            for item in items[:50]:
+                part = item['part_num']
+                replacement = item.get('storage', '')
+                lines.append(f"• {part}" + (f" → {replacement}" if replacement else ""))
+            if len(items) > 50:
+                lines.append(f"... и ещё {len(items) - 50} поз.")
+            text = "\n".join(lines)
+    except Exception as e:
+        logger.error("[B24Bot] _do_disc_list %s: %s", vendor, e, exc_info=True)
+        text = f"❌ Ошибка получения списка: {e}"
+
+    return [_msg(text, keyboard=KB_MAIN)]
+
+
+async def _do_disc_mark(args: str) -> list[dict]:
+    parts = args.split()
+    if len(parts) < 2:
+        return [_msg("Формат: [B]пометить VENDOR АРТИКУЛ[/B]  или  [B]пометить VENDOR АРТИКУЛ ЗАМЕНА[/B]", keyboard=KB_MAIN)]
+
+    vendor = parts[0].upper()
+    article = parts[1]
+    replacement = parts[2] if len(parts) > 2 else None
+
+    if vendor not in AUTO_VENDORS:
+        return [_msg(f"❌ Неизвестный вендор: [B]{vendor}[/B]. Доступны: {', '.join(AUTO_VENDORS)}", keyboard=KB_MAIN)]
+
+    loop = asyncio.get_event_loop()
+
+    def _mark() -> bool:
+        repo = SqlRepository(settings.DATABASE_URL)
+        return repo.mark_as_discontinued(vendor, article, replacement)
+
+    try:
+        found = await loop.run_in_executor(None, _mark)
+        if found:
+            repl_text = f" (замена: {replacement})" if replacement else ""
+            text = f"✅ [B]{vendor} {article}[/B] помечен как снятый с производства{repl_text}"
+        else:
+            text = f"❌ Позиция [B]{vendor} {article}[/B] не найдена в базе"
+    except Exception as e:
+        logger.error("[B24Bot] _do_disc_mark error: %s", e, exc_info=True)
+        text = f"❌ Ошибка пометки: {e}"
+
+    return [_msg(text, keyboard=KB_MAIN)]
+
+
+async def _do_disc_unmark(args: str) -> list[dict]:
+    parts = args.split()
+    if len(parts) < 2:
+        return [_msg("Формат: [B]восстановить VENDOR АРТИКУЛ[/B]", keyboard=KB_MAIN)]
+
+    vendor = parts[0].upper()
+    article = parts[1]
+
+    if vendor not in AUTO_VENDORS:
+        return [_msg(f"❌ Неизвестный вендор: [B]{vendor}[/B]. Доступны: {', '.join(AUTO_VENDORS)}", keyboard=KB_MAIN)]
+
+    loop = asyncio.get_event_loop()
+
+    def _unmark() -> bool:
+        repo = SqlRepository(settings.DATABASE_URL)
+        return repo.unmark_discontinued(vendor, article)
+
+    try:
+        found = await loop.run_in_executor(None, _unmark)
+        if found:
+            text = f"✅ [B]{vendor} {article}[/B] — пометка снята, статус активен"
+        else:
+            text = f"❌ Позиция [B]{vendor} {article}[/B] не найдена среди снятых"
+    except Exception as e:
+        logger.error("[B24Bot] _do_disc_unmark error: %s", e, exc_info=True)
+        text = f"❌ Ошибка снятия пометки: {e}"
+
+    return [_msg(text, keyboard=KB_MAIN)]
+
+
+# ------------------------------------------------------------------
 # Help text
 # ------------------------------------------------------------------
 
@@ -318,5 +504,7 @@ def _help_text() -> str:
         "📊 [B]статус[/B] — последняя синхронизация по каждому вендору\n"
         "🔄 [B]синхронизировать[/B] — синхронизировать выбранного вендора\n"
         "🔍 [B]проверить[/B] — проверить изменения без записи в БД\n"
-        "🔄 [B]sync_all[/B] — синхронизировать всех вендоров"
+        "🔄 [B]sync_all[/B] — синхронизировать всех вендоров\n"
+        "⚡ [B]шина[/B] — цены на медь/алюминий; [B]шина медь 1400[/B] — обновить\n"
+        "🚫 [B]снятые[/B] — снятые с производства; [B]пометить VENDOR АРТ[/B] / [B]восстановить VENDOR АРТ[/B]"
     )
