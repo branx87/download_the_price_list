@@ -17,16 +17,20 @@ logger = logging.getLogger(__name__)
 class SqlRepository(IRepository):
     """Репозиторий для работы с SQL БД через SQLAlchemy"""
 
+    _schema_initialized: bool = False
+
     def __init__(self, database_url: str):
         self.is_sqlite = 'sqlite' in database_url.lower()
         self.engine = create_engine(database_url)
         self.SessionLocal = sessionmaker(bind=self.engine)
         self.data_normalizer = DataNormalizer()
         self._synonyms_cache = None
-        if self.is_sqlite:
-            self._apply_sqlite_pragmas()
-        self._ensure_indexes()
-        self._ensure_selectric_tables()
+        if not SqlRepository._schema_initialized:
+            if self.is_sqlite:
+                self._apply_sqlite_pragmas()
+            self._ensure_indexes()
+            self._ensure_selectric_tables()
+            SqlRepository._schema_initialized = True
 
     def _apply_sqlite_pragmas(self):
         """Оптимизация SQLite для быстрой записи"""
@@ -558,6 +562,22 @@ class SqlRepository(IRepository):
 
             result = session.execute(query, {'vendor': vendor_normalized}).fetchone()
             return result[0] if result else 0
+
+    def get_vendors_status(self, vendors: list) -> dict:
+        """Получить дату последнего обновления и количество позиций для списка вендоров.
+        Один запрос вместо N×2."""
+        normalized = [self.data_normalizer.normalize_vendor_name(v) for v in vendors]
+        placeholders = ', '.join([f':v{i}' for i in range(len(normalized))])
+        params = {f'v{i}': v for i, v in enumerate(normalized)}
+
+        with self.SessionLocal() as session:
+            result = session.execute(text(f"""
+                SELECT Vendor, MAX(updated_at), COUNT(*)
+                FROM Total_Price {self._nolock}
+                WHERE Vendor IN ({placeholders})
+                GROUP BY Vendor
+            """), params)
+            return {row[0]: (row[1], row[2]) for row in result}
 
     # ========== Методы для 1C-ERP ==========
 

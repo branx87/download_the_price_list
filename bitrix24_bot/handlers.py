@@ -15,6 +15,7 @@ Bitrix24 bot — обработчики команд.
 """
 import asyncio
 import logging
+from datetime import datetime
 from typing import Optional
 
 from config.settings import settings
@@ -23,6 +24,7 @@ from vendors.registry import VendorRegistry
 from adapters.database.sql_repository import SqlRepository
 from domain.services.sync_service import SyncService
 from domain.services.report_service import ReportService
+from domain.services.data_normalizer import DataNormalizer
 from adapters.bitrix.bitrix_api import BitrixBotAPI
 
 logger = logging.getLogger(__name__)
@@ -164,23 +166,26 @@ async def _do_status() -> list[dict]:
 
     def _fetch() -> str:
         repo = SqlRepository(settings.DATABASE_URL)
+        stats = repo.get_vendors_status(AUTO_VENDORS)
         lines = ["[B]Статус синхронизации:[/B]\n"]
         for vendor in AUTO_VENDORS:
-            last = repo.get_vendor_last_update(vendor)
-            count = repo.get_vendor_total_count(vendor)
-            if last:
+            key = DataNormalizer.normalize_vendor_name(vendor)
+            if key in stats:
+                last, count = stats[key]
+                if isinstance(last, str):
+                    last = datetime.fromisoformat(last)
                 lines.append(f"• {vendor}: {last.strftime('%d.%m.%Y %H:%M')}, {count} поз.")
             else:
                 lines.append(f"• {vendor}: нет данных")
         return "\n".join(lines)
 
     try:
-        text = await loop.run_in_executor(None, _fetch)
+        status_text = await loop.run_in_executor(None, _fetch)
     except Exception as e:
         logger.error("[B24Bot] _do_status error: %s", e, exc_info=True)
-        text = f"❌ Ошибка получения статуса: {e}"
+        status_text = f"❌ Ошибка получения статуса: {e}"
 
-    return [_msg(text, keyboard=KB_MAIN)]
+    return [_msg(status_text, keyboard=KB_MAIN)]
 
 
 # ------------------------------------------------------------------
