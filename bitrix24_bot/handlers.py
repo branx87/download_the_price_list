@@ -155,7 +155,8 @@ async def handle_message(
         return [_msg(
             "Снятые с производства:\n"
             "• Выберите вендора для просмотра списка\n"
-            "• Пометить: [B]пометить VENDOR АРТИКУЛ[/B] (с заменой: пометить VENDOR АРТИКУЛ ЗАМЕНА)\n"
+            "• Пометить одну: [B]пометить VENDOR АРТИКУЛ[/B] (с заменой: пометить VENDOR АРТИКУЛ ЗАМЕНА)\n"
+            "• Пометить список: [B]пометить-список[/B] (каждая строка: VENDOR АРТИКУЛ ЗАМЕНА)\n"
             "• Снять пометку: [B]восстановить VENDOR АРТИКУЛ[/B]",
             keyboard=KB_DISC,
         )]
@@ -164,6 +165,10 @@ async def handle_message(
         vendor = raw[5:].upper()
         if vendor in AUTO_VENDORS:
             return await _do_disc_list(vendor)
+
+    if raw.startswith("пометить-список"):
+        lines = text.strip().split('\n')[1:]
+        return await _do_disc_batch(lines)
 
     if raw.startswith("пометить "):
         return await _do_disc_mark(raw[9:].strip())
@@ -494,6 +499,61 @@ async def _do_disc_unmark(args: str) -> list[dict]:
     return [_msg(text, keyboard=KB_MAIN)]
 
 
+async def _do_disc_batch(lines: list) -> list[dict]:
+    """Массовая пометка снятых с производства из многострочного сообщения.
+
+    Каждая строка: VENDOR АРТИКУЛ [ЗАМЕНА]
+    """
+    items = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        vendor = parts[0].upper()
+        article = parts[1]
+        replacement = parts[2] if len(parts) > 2 else None
+        if vendor in AUTO_VENDORS:
+            items.append((vendor, article, replacement))
+
+    if not items:
+        return [_msg(
+            "⚠️ Нет распознанных строк.\n\n"
+            "Формат:\n[B]пометить-список[/B]\nKEAZ 103505 333147\nKEAZ 103507\nEKF mdse-47-pro RDE4716",
+            keyboard=KB_MAIN,
+        )]
+
+    loop = asyncio.get_event_loop()
+
+    def _mark_batch():
+        repo = SqlRepository(settings.DATABASE_URL)
+        marked = 0
+        not_found = []
+        for vendor, article, replacement in items:
+            ok = repo.mark_as_discontinued(vendor, article, replacement)
+            if ok:
+                marked += 1
+            else:
+                not_found.append(f"{vendor} {article}")
+        return marked, not_found
+
+    try:
+        marked, not_found = await loop.run_in_executor(None, _mark_batch)
+        out = [f"✅ Помечено: [B]{marked}[/B] из {len(items)} позиций."]
+        if not_found:
+            out.append(f"⚠️ Не найдено в БД: {len(not_found)}")
+            for ex in not_found[:10]:
+                out.append(f"  • {ex}")
+        text = "\n".join(out)
+    except Exception as e:
+        logger.error("[B24Bot] _do_disc_batch error: %s", e, exc_info=True)
+        text = f"❌ Ошибка импорта: {e}"
+
+    return [_msg(text, keyboard=KB_MAIN)]
+
+
 # ------------------------------------------------------------------
 # Help text
 # ------------------------------------------------------------------
@@ -506,5 +566,6 @@ def _help_text() -> str:
         "🔍 [B]проверить[/B] — проверить изменения без записи в БД\n"
         "🔄 [B]sync_all[/B] — синхронизировать всех вендоров\n"
         "⚡ [B]шина[/B] — цены на медь/алюминий; [B]шина медь 1400[/B] — обновить\n"
-        "🚫 [B]снятые[/B] — снятые с производства; [B]пометить VENDOR АРТ[/B] / [B]восстановить VENDOR АРТ[/B]"
+        "🚫 [B]снятые[/B] — снятые с производства; [B]пометить VENDOR АРТ[/B] / [B]восстановить VENDOR АРТ[/B]\n"
+        "   Список: [B]пометить-список[/B] (затем VENDOR АРТ ЗАМЕНА на каждой строке)"
     )

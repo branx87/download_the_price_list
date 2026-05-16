@@ -1432,6 +1432,16 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    # Файл со списком снятых с производства
+    is_discontinued = any(kw in filename.lower() for kw in ('снят', 'disc'))
+    if is_discontinued:
+        settings.PRICE_FILES_DIR.mkdir(parents=True, exist_ok=True)
+        dest_path = settings.PRICE_FILES_DIR / filename
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(str(dest_path))
+        await _handle_discontinued_upload(update, dest_path)
+        return
+
     # Определяем вендора по имени файла
     vendor = detect_vendor_from_filename(filename)
     if vendor is None:
@@ -1510,6 +1520,88 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error("[FIX] upload_price_handler: ошибка vendor=%s: %s", vendor, e, exc_info=True)
         await update.message.reply_text(f"❌ Ошибка при синхронизации <b>{vendor}</b>:\n{str(e)[:300]}", parse_mode='HTML')
+
+
+async def _handle_discontinued_upload(update: Update, dest_path):
+    """Импорт списка снятых с производства из Excel/CSV файла.
+
+    Формат файла: строки с колонками Vendor | Article | Replacement (необязательно).
+    Первая строка пропускается если не является данными (заголовок).
+    """
+    import openpyxl
+    import csv as csv_mod
+
+    ext = dest_path.suffix.lower()
+    raw_rows = []
+    try:
+        if ext in ('.xlsx', '.xls'):
+            wb = openpyxl.load_workbook(dest_path, read_only=True, data_only=True)
+            ws = wb.active
+            for row in ws.iter_rows(values_only=True):
+                if any(c is not None for c in row):
+                    raw_rows.append([str(c).strip() if c is not None else '' for c in row])
+            wb.close()
+        elif ext == '.csv':
+            with open(dest_path, 'r', encoding='utf-8-sig') as f:
+                for row in csv_mod.reader(f):
+                    if row:
+                        raw_rows.append([c.strip() for c in row])
+        else:
+            await update.message.reply_text("⚠️ Поддерживаются .xlsx и .csv файлы.")
+            return
+    except Exception as e:
+        logger.error("[DISCONTINUED] upload parse error: %s", e, exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка чтения файла: {e}")
+        return
+
+    if not raw_rows:
+        await update.message.reply_text("⚠️ Файл пустой.")
+        return
+
+    known_vendors = {'KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT'}
+    if raw_rows[0][0].upper() not in known_vendors:
+        raw_rows = raw_rows[1:]  # пропускаем заголовок
+
+    if not raw_rows:
+        await update.message.reply_text("⚠️ В файле нет данных (только заголовок?).")
+        return
+
+    await update.message.reply_text(f"📥 Начинаю импорт {len(raw_rows)} позиций...")
+
+    def _do_batch():
+        repo = SqlRepository(settings.DATABASE_URL)
+        marked = 0
+        not_found = []
+        for row in raw_rows:
+            if len(row) < 2 or not row[0] or not row[1]:
+                continue
+            vendor = row[0].upper()
+            article = row[1]
+            replacement = row[2] if len(row) > 2 and row[2] else None
+            try:
+                ok = repo.mark_as_discontinued(vendor, article, replacement)
+                if ok:
+                    marked += 1
+                else:
+                    not_found.append(f"{vendor} | {article}")
+            except Exception as e:
+                logger.error("[DISCONTINUED] batch row error %s %s: %s", vendor, article, e)
+                not_found.append(f"{vendor} | {article} (ERR)")
+        return marked, not_found
+
+    marked, not_found = await asyncio.get_event_loop().run_in_executor(None, _do_batch)
+
+    lines = [f"✅ <b>Импорт завершён</b>: помечено <b>{marked}</b> позиций."]
+    if not_found:
+        lines.append(f"⚠️ Не найдено в БД: {len(not_found)}")
+        for ex in not_found[:10]:
+            lines.append(f"  • {ex}")
+        if len(not_found) > 10:
+            lines.append(f"  ... и ещё {len(not_found) - 10}")
+    logger.info("[DISCONTINUED] batch upload: marked=%d not_found=%d file=%s",
+                marked, len(not_found), dest_path.name)
+    await update.message.reply_text("\n".join(lines), parse_mode='HTML',
+                                    reply_markup=_disc_main_keyboard())
 
 
 # ─── Снятые с производства (/discontinued) ────────────────────────────────────
