@@ -56,7 +56,14 @@ class SyncService:
             logger.info(f"🚀 Начинаем синхронизацию {vendor}")
 
             # 1. Загружаем файл
-            file_path = self.downloader.download(vendor)
+            try:
+                file_path = self.downloader.download(vendor)
+            except Exception as download_error:
+                try:
+                    file_path = self.downloader.storage.get_latest_file(vendor)
+                    logger.warning(f"⚠️ {vendor}: загрузка не удалась ({download_error}), использую кэш: {file_path.name}")
+                except (FileNotFoundError, AttributeError):
+                    raise download_error
             result.file_path = str(file_path)
             logger.info(f"📥 Файл загружен: {file_path.name}")
 

@@ -31,7 +31,7 @@ from adapters.bitrix.bitrix_api import BitrixBotAPI
 logger = logging.getLogger(__name__)
 
 # Вендоры с автоматической загрузкой файла (без ручной загрузки)
-AUTO_VENDORS = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
+AUTO_VENDORS = ['DKC', 'KEAZ', 'ОВЕН', 'EKF', 'IEK', 'CHINT']
 
 
 # ------------------------------------------------------------------
