@@ -32,11 +32,11 @@ class DkcDownloader(BaseDownloader):
         try:
             logger.info("DKC: Получение страницы авторизации...")
             time.sleep(2)
-            response = session.get(login_url, headers=headers, timeout=30)
+            response = session.get(login_url, headers=headers, timeout=60)
             response.raise_for_status()
-            
+
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             # Ищем CSRF-токен
             csrf_token = None
             for name in ['sessid', 'csrf_token', 'bitrix_ajax']:
@@ -44,7 +44,7 @@ class DkcDownloader(BaseDownloader):
                 if input_tag and input_tag.get('value'):
                     csrf_token = input_tag.get('value')
                     break
-            
+
             # Данные для авторизации
             auth_data = {
                 'AUTH_FORM': 'Y',
@@ -54,13 +54,13 @@ class DkcDownloader(BaseDownloader):
                 'Login': 'Войти',
                 'backurl': '/ru/personal/price/'
             }
-            
+
             if csrf_token:
                 auth_data['sessid'] = csrf_token
-            
+
             logger.info("DKC: Отправка данных авторизации...")
             time.sleep(2)
-            response = session.post(login_url, data=auth_data, headers=headers, timeout=30)
+            response = session.post(login_url, data=auth_data, headers=headers, timeout=60)
             response.raise_for_status()
             
             if "Неверный логин или пароль" in response.text:
@@ -125,8 +125,9 @@ class DkcDownloader(BaseDownloader):
                 except Exception as e:
                     if attempt == 2:
                         raise
-                    logger.warning(f"DKC: Попытка {attempt + 1} не удалась, повтор...")
-                    time.sleep(5)
+                    delay = 15 * (attempt + 1)  # 15s, 30s
+                    logger.warning(f"DKC: Попытка {attempt + 1} не удалась, повтор через {delay}с...")
+                    time.sleep(delay)
             
             # Получаем страницу с прайсами
             price_page_url = self._get_download_url()
