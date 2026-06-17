@@ -513,6 +513,138 @@ class SqlRepository(IRepository):
 
         return updated_count
 
+    def restore_disappeared(self, vendor: str, articles: List[str] = None) -> int:
+        """Восстановить позиции со статусом 'disappeared' обратно в активные.
+
+        Если articles не указан — восстанавливает все disappeared для vendor.
+        Если articles указан — восстанавливает только указанные артикулы.
+        """
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+        current_time = datetime.now()
+
+        if articles:
+            batch_size = 500
+            updated_count = 0
+            for i in range(0, len(articles), batch_size):
+                batch = articles[i:i + batch_size]
+                article_placeholders = ', '.join([f':art{j}' for j in range(len(batch))])
+                params = {'vendor': vendor_normalized, 'updated_at': current_time}
+                params.update({f'art{j}': art for j, art in enumerate(batch)})
+
+                query = text(f"""
+                    UPDATE Total_Price
+                    SET Status = 'active',
+                        updated_at = :updated_at
+                    WHERE Vendor = :vendor
+                    AND Status = 'disappeared'
+                    AND Part_Num IN ({article_placeholders})
+                """)
+
+                with self.SessionLocal() as session:
+                    result = session.execute(query, params)
+                    session.commit()
+                    updated_count += result.rowcount
+
+            if updated_count > 0:
+                logger.info(f"[FIX] Восстановлено {updated_count} позиций (disappeared → active) для {vendor}")
+            return updated_count
+        else:
+            query = text("""
+                UPDATE Total_Price
+                SET Status = 'active',
+                    updated_at = :updated_at
+                WHERE Vendor = :vendor
+                AND Status = 'disappeared'
+            """)
+
+            with self.SessionLocal() as session:
+                result = session.execute(query, {
+                    'vendor': vendor_normalized,
+                    'updated_at': current_time
+                })
+                session.commit()
+                count = result.rowcount
+                if count > 0:
+                    logger.info(f"[FIX] Восстановлено {count} позиций (disappeared → active) для {vendor}")
+                return count
+
+    def get_disappeared_articles(self, vendor: str) -> Set[str]:
+        """Получить артикулы со статусом disappeared."""
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+
+        with self.SessionLocal() as session:
+            query = text(f"""
+                SELECT Part_Num
+                FROM Total_Price {self._nolock}
+                WHERE Vendor = :vendor AND Status = 'disappeared'
+            """)
+            result = session.execute(query, {'vendor': vendor_normalized})
+            return {row[0] for row in result}
+
+    def get_disappeared_items(self, vendor: str) -> List[PriceItem]:
+        """Получить позиции со статусом disappeared."""
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+
+        with self.SessionLocal() as session:
+            query = text(f"""
+                SELECT Vendor, Part_Num, Descr, Price, Units, Storage
+                FROM Total_Price {self._nolock}
+                WHERE Vendor = :vendor AND Status = 'disappeared'
+            """)
+            result = session.execute(query, {'vendor': vendor_normalized})
+            rows = result.fetchall()
+
+            items = []
+            for row in rows:
+                try:
+                    article_normalized = self.data_normalizer.normalize_article(row[1], vendor_normalized)
+                    unit_normalized = self.data_normalizer.normalize_unit(row[4] if row[4] else 'шт')
+                    item = PriceItem(
+                        vendor=vendor_normalized,
+                        article=article_normalized,
+                        description=row[2] or "",
+                        price=Decimal(str(row[3])) if row[3] else Decimal('0'),
+                        units=unit_normalized,
+                        storage=row[5] or ""
+                    )
+                    items.append(item)
+                except Exception as e:
+                    logger.warning(f"Пропущена disappeared запись: {e}")
+
+            return items
+
+    def delete_old_disappeared(self, vendor: str, days: int = 30):
+        """Ставит 'Цена по запросу' старым исчезнувшим позициям вместо удаления."""
+        vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)
+        cutoff_date = datetime.now() - timedelta(days=days)
+
+        query = text("""
+            UPDATE Total_Price
+            SET Price = 0,
+                PriceText = 'Цена по запросу',
+                Status = 'price_on_request',
+                updated_at = :updated_at
+            WHERE Vendor = :vendor
+            AND Status = 'disappeared'
+            AND updated_at < :cutoff_date
+        """)
+
+        with self.SessionLocal() as session:
+            result = session.execute(query, {
+                'vendor': vendor_normalized,
+                'cutoff_date': cutoff_date,
+                'updated_at': datetime.now()
+            })
+            session.commit()
+            if result.rowcount > 0:
+                logger.info(
+                    f"📋 {result.rowcount} позиций переведено в 'Цена по запросу' (>{days} дней disappeared)"
+                )
+            count = result.rowcount
+            if count > 0:
+                logger.info(f"[FIX] Восстановлено {count} позиций (disappeared → active) для {vendor}")
+            return count
+
     def delete_old_disappeared(self, vendor: str, days: int = 30):
         # Нормализуем vendor name
         vendor_normalized = self.data_normalizer.normalize_vendor_name(vendor)

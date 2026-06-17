@@ -38,6 +38,22 @@ class IRepository(ABC):
         """Удалить старые исчезнувшие позиции"""
         pass
 
+    def get_disappeared_articles(self, vendor: str) -> Set[str]:
+        """Артикулы со статусом disappeared. Дефолт: пустое множество."""
+        return set()
+
+    def get_disappeared_items(self, vendor: str) -> List[PriceItem]:
+        """Позиции со статусом disappeared. Дефолт: пустой список."""
+        return []
+
+    def restore_disappeared(self, vendor: str, articles: List[str]) -> int:
+        """Восстановить позиции из disappeared в active. Дефолт: 0."""
+        return 0
+
+    def mark_price_on_request(self, vendor: str, articles: List[str]) -> int:
+        """Пометить позиции как 'Цена по запросу'. Дефолт: 0."""
+        return 0
+
     @abstractmethod
     def get_vendor_last_update(self, vendor: str) -> Optional[datetime]:
         """Получить дату последнего обновления вендора"""

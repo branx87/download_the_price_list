@@ -235,7 +235,7 @@ async def _run_sync_vendor(vendor: str, dialog_id: str) -> None:
     try:
         def _sync():
             service = _create_sync_service(vendor)
-            return service.sync_vendor(vendor)
+            return service.sync_vendor(vendor, mark_disappeared=False)
 
         result = await loop.run_in_executor(None, _sync)
 
@@ -245,9 +245,10 @@ async def _run_sync_vendor(vendor: str, dialog_id: str) -> None:
                 f"Всего: {result.total_items} поз. | "
                 f"Новых: {result.new_items} | "
                 f"Изменений цены: {result.price_changes_count} | "
-                f"Исчезло: {result.disappeared_items} | "
                 f"Время: {result.execution_time:.0f}с"
             )
+            if result.restored_items:
+                text += f" | Восстановлено: {result.restored_items}"
         else:
             text = f"❌ [B]{vendor}[/B]: ошибка — {result.error_message}"
 
@@ -272,7 +273,7 @@ async def _run_sync_all(dialog_id: str) -> None:
         try:
             def _sync(v=vendor):
                 service = _create_sync_service(v)
-                return service.sync_vendor(v)
+                return service.sync_vendor(v, mark_disappeared=False)
 
             result = await loop.run_in_executor(None, _sync)
             results.append(result)

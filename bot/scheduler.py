@@ -168,6 +168,8 @@ async def _job_sync_all(context) -> None:
                     parts.append(f"➕{result.new_items}")
                 if result.updated_items:
                     parts.append(f"🔄{result.updated_items}")
+                if result.restored_items:
+                    parts.append(f"♻️{result.restored_items}")
                 if result.disappeared_items:
                     parts.append(f"👻{result.disappeared_items}")
                 results_lines.append(" | ".join(parts))

@@ -53,8 +53,8 @@ class AkelParser(IParser):
     """Парсер многолистового Excel прайса AKEL.
 
     Логика:
-    - Заголовки на строке 2 (индекс 1 в 0-based openpyxl = row 2).
-    - Данные начиная со строки 3 (row 3+).
+    - Заголовки ищутся динамически среди первых 5 строк (ищет 'артикул' + 'тариф'/'без ндс').
+    - Данные начинаются сразу после строки заголовков.
     - Колонки определяются нечётким поиском.
     - Листы без колонок article + price пропускаются.
     - Дубликаты артикулов дедуплицируются (берётся первый встреченный).
@@ -84,16 +84,35 @@ class AkelParser(IParser):
         )
         return items
 
+    def _find_header_row(self, rows: list, max_scan: int = 5) -> Optional[int]:
+        """Ищет строку-заголовок среди первых max_scan строк.
+
+        Ищет строку, содержащую и 'артикул', и ('тариф' или 'без ндс').
+        Возвращает индекс строки или None.
+        """
+        for idx in range(min(max_scan, len(rows))):
+            cells = [str(c).strip().lower() if c is not None else '' for c in rows[idx]]
+            has_article = any('артикул' in c for c in cells)
+            has_price = any(('тариф' in c) or ('без ндс' in c) for c in cells)
+            if has_article and has_price:
+                return idx
+        return None
+
     def _parse_sheet(self, ws, sheet_name: str, vendor: str, seen_articles: set):
         """Возвращает (items, has_headers) где has_headers — найдены ли обязательные колонки."""
         rows = list(ws.iter_rows(values_only=True))
 
-        if len(rows) < 3:
-            logger.debug("[FIX] AkelParser: лист '%s' содержит < 3 строк — пропускаем", sheet_name)
+        if len(rows) < 2:
+            logger.debug("[FIX] AkelParser: лист '%s' содержит < 2 строк — пропускаем", sheet_name)
             return [], False
 
-        # Заголовки на строке 2 (индекс 1)
-        header_row = [str(h).strip().lower() if h is not None else '' for h in rows[1]]
+        header_idx = self._find_header_row(rows)
+        if header_idx is None:
+            logger.debug("[FIX] AkelParser: лист '%s' — строка заголовков не найдена (сканировано %d строк) — пропускаем",
+                         sheet_name, min(len(rows), 5))
+            return [], False
+
+        header_row = [str(h).strip().lower() if h is not None else '' for h in rows[header_idx]]
 
         col_map = self._map_columns(header_row)
 
@@ -104,10 +123,10 @@ class AkelParser(IParser):
             )
             return [], False
 
-        logger.debug("[FIX] AkelParser: лист '%s' col_map=%s", sheet_name, col_map)
+        logger.debug("[FIX] AkelParser: лист '%s' заголовки на строке %d, col_map=%s", sheet_name, header_idx + 1, col_map)
 
         items: List[PriceItem] = []
-        for row in rows[2:]:  # данные с row 3
+        for row in rows[header_idx + 1:]:
             item = self._parse_row(row, col_map, vendor, sheet_name, seen_articles)
             if item is not None:
                 items.append(item)
@@ -122,7 +141,9 @@ class AkelParser(IParser):
                            or _find_column(headers, ['описание']),
             'storage': _find_column(headers, _COLUMN_KEYWORDS['storage'])
                        or _find_column(headers, ['статус']),
-            'price': _find_column(headers, _COLUMN_KEYWORDS['price']),
+            'price': _find_column(headers, _COLUMN_KEYWORDS['price'])
+                     or _find_column(headers, ['тариф'])
+                     or _find_column(headers, ['без ндс']),
         }
 
     def _parse_row(self, row, col_map: Dict[str, Optional[int]], vendor: str, sheet_name: str, seen_articles: set) -> Optional[PriceItem]:

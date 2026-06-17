@@ -1492,7 +1492,9 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             report_service=report_service,
         )
 
-        result = await asyncio.get_event_loop().run_in_executor(None, service.sync_vendor, vendor)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: service.sync_vendor(vendor, mark_disappeared=False)
+        )
         logger.info("[FIX] upload_price_handler: sync done vendor=%s total=%s new=%s updated=%s",
                     vendor, result.total_items, result.new_items, result.updated_items)
 
@@ -1503,6 +1505,8 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"➕ Новых: {result.new_items}",
             f"🔄 Обновлено: {result.updated_items}",
         ]
+        if result.restored_items > 0:
+            report_lines.append(f"♻️ Восстановлено: {result.restored_items}")
         if result.price_changes_count > 0:
             report_lines.append(f"💰 Изменений цен: {result.price_changes_count}")
         if result.disappeared_items > 0:

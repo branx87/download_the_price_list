@@ -19,6 +19,7 @@ class SyncResult:
     new_items: int = 0
     updated_items: int = 0
     disappeared_items: int = 0
+    restored_items: int = 0
 
     # Детали
     error_message: str = ""
@@ -43,7 +44,7 @@ class SyncResult:
     @property
     def changes_count(self) -> int:
         """Общее количество изменений"""
-        return self.new_items + self.updated_items + self.disappeared_items
+        return self.new_items + self.updated_items + self.disappeared_items + self.restored_items
 
     @property
     def price_changes_count(self) -> int:

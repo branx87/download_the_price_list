@@ -40,12 +40,14 @@ class SyncService:
         self.price_change_threshold = price_change_threshold
         self.report_service = report_service
 
-    def sync_vendor(self, vendor: str) -> SyncResult:
+    def sync_vendor(self, vendor: str, mark_disappeared: bool = True) -> SyncResult:
         """
         Синхронизирует прайс-лист одного вендора.
 
         Args:
             vendor: Название вендора
+            mark_disappeared: Помечать ли отсутствующие позиции как disappeared.
+                             False для ручных загрузок (частичные прайсы).
 
         Returns:
             SyncResult: Результат синхронизации
@@ -53,7 +55,7 @@ class SyncService:
         result = SyncResult(vendor=vendor, success=False)
 
         try:
-            logger.info(f"🚀 Начинаем синхронизацию {vendor}")
+            logger.info(f"🚀 Начинаем синхронизацию {vendor} (mark_disappeared={mark_disappeared})")
 
             # 1. Загружаем файл
             try:
@@ -72,10 +74,31 @@ class SyncService:
             result.total_items = len(new_items)
             logger.info(f"📊 Распарсено {len(new_items)} позиций")
 
-            # 3. Получаем текущие данные из БД
+            # 3. Получаем текущие данные из БД (активные + disappeared)
             current_items = self.repository.get_items_by_vendor(vendor)
+
+            # Защита: если парсер вернул 0 позиций, а в БД есть активные —
+            # скорее всего файл в другом формате, пропускаем синхронизацию
+            if len(new_items) == 0 and len(current_items) > 0:
+                result.error_message = (
+                    f"Парсер вернул 0 позиций при {len(current_items)} в БД. "
+                    f"Возможно файл в неизвестном формате. Синхронизация пропущена."
+                )
+                result.disappeared_items = 0
+                result.success = True
+                logger.warning(
+                    f"⚠️ {vendor}: парсер вернул 0 позиций, в БД {len(current_items)} — "
+                    f"синхронизация пропущена (защита от потери данных)"
+                )
+                return result
             current_articles = {item.article for item in current_items}
             current_items_map = {item.article: item for item in current_items}
+
+            # Получаем disappeared позиции — они могут вернуться в файле
+            disappeared_articles = self.repository.get_disappeared_articles(vendor)
+            disappeared_items_map = {item.article: item for item in self.repository.get_disappeared_items(vendor)}
+            if disappeared_articles:
+                logger.info(f"👻 В БД {len(disappeared_articles)} disappeared позиций")
 
             # Снятые с производства — не трогаем при синхронизации
             discontinued_articles = self.repository.get_discontinued_articles(vendor)
@@ -91,18 +114,34 @@ class SyncService:
             new_items_with_price_map = {item.article: item for item in new_items_with_price}
             new_articles_with_price = set(new_items_with_price_map.keys())
 
+            # Все артикулы, которые были в БД (активные + disappeared)
+            all_db_articles = current_articles | disappeared_articles
+
             # Позиции "по запросу" (price=0): разбиваем на новые и существующие
             price_on_request_items = [item for item in new_items if float(item.price) == 0]
-            price_on_request_new = [i for i in price_on_request_items if i.article not in current_articles]
+            price_on_request_new = [i for i in price_on_request_items if i.article not in all_db_articles]
             price_on_request_existing = [i.article for i in price_on_request_items if i.article in current_articles]
 
-            # Новые позиции (есть в файле, нет в БД, и есть цена)
+            # Восстановление disappeared позиций, которые появились в файле
+            to_restore = []
+            restored_articles = set()
+            if disappeared_articles:
+                for article in (disappeared_articles & new_articles):
+                    restored_articles.add(article)
+                    # Если позиция с ценой > 0 — восстанавливаем с новыми данными
+                    if article in new_items_with_price_map:
+                        to_restore.append(new_items_with_price_map[article])
+                    else:
+                        # Цена 0 — просто восстанавливаем статус
+                        to_restore.append(disappeared_items_map.get(article) or new_items_map[article])
+
+            # Новые позиции (есть в файле, нет в БД нигде — ни active, ни disappeared)
             to_add = [
                 new_items_with_price_map[art]
-                for art in (new_articles_with_price - current_articles)
+                for art in (new_articles_with_price - all_db_articles)
             ]
 
-            # Исчезнувшие позиции (есть в БД, нет в файле ВООБЩЕ - даже без цены)
+            # Исчезнувшие позиции (есть в active БД, нет в файле ВООБЩЕ)
             disappeared_articles = list(current_articles - new_articles)
             disappeared_items = [
                 current_items_map[art]
@@ -110,8 +149,12 @@ class SyncService:
             ]
 
             # Debug: логируем статистику
-            logger.info(f"📊 Статистика артикулов: БД={len(current_articles)}, "
-                       f"Файл={len(new_articles)}, Исчезло={len(disappeared_articles)}")
+            logger.info(f"📊 Статистика: БД(active)={len(current_articles)}, "
+                       f"БД(disappeared)={len(disappeared_articles)}, "
+                       f"Файл={len(new_articles)}, "
+                       f"Восстановлено={len(restored_articles)}, "
+                       f"Новых={len(to_add)}, "
+                       f"Исчезло={len(disappeared_articles)}")
 
             # Исчезнувшие позиции — discontinued не трогаем
             if discontinued_articles:
@@ -144,6 +187,20 @@ class SyncService:
                 synonyms_map = self.repository.get_synonyms_cached()
 
             # 6. Применяем изменения
+
+            # Восстановление disappeared позиций
+            if to_restore:
+                restored_count = self.repository.restore_disappeared(
+                    vendor, [item.article for item in to_restore]
+                )
+                # Обновляем данные восстановленных позиций
+                if restored_count > 0:
+                    items_to_update = [item for item in to_restore if float(item.price) > 0]
+                    if items_to_update:
+                        self.repository.update_items(items_to_update, synonyms_map=synonyms_map)
+                    result.restored_items = restored_count
+                    logger.info(f"♻️ Восстановлено из disappeared: {restored_count}")
+
             if to_add:
                 added = self.repository.add_items(to_add, synonyms_map=synonyms_map)
                 result.new_items = added
@@ -171,14 +228,20 @@ class SyncService:
                 self.repository.mark_price_on_request(vendor, price_on_request_existing)
                 logger.info(f"💬 Обновлено 'Цена по запросу' (существующих): {len(price_on_request_existing)}")
 
-            if disappeared_articles:
+            if disappeared_articles and mark_disappeared:
                 marked = self.repository.mark_as_disappeared(vendor, disappeared_articles)
                 result.disappeared_items = marked
                 result.disappeared_items_list = disappeared_items
                 logger.info(f"👻 Помечено исчезнувших: {marked}")
+            elif disappeared_articles and not mark_disappeared:
+                logger.info(
+                    f"📋 Пропуск пометки disappeared: {len(disappeared_articles)} позиций "
+                    f"(mark_disappeared=False, ручная загрузка)"
+                )
 
-            # 6. Очищаем старые исчезнувшие
-            self.repository.delete_old_disappeared(vendor, days=30)
+            # 6. Очищаем старые исчезнувшие (только при полной синхронизации)
+            if mark_disappeared:
+                self.repository.delete_old_disappeared(vendor, days=30)
 
             # 7. Сбрасываем статус price_changed после синхронизации
             reset_count = self.repository.reset_changed_status(vendor)
