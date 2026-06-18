@@ -10,22 +10,22 @@ from domain.interfaces.parser import IParser
 
 logger = logging.getLogger(__name__)
 
-# Нечёткие ключевые слова для поиска нужных колонок
+# Ключевые слова для поиска нужных колонок (приоритет: основные → альтернативы)
 _COLUMN_KEYWORDS = {
     'article': ['артикул'],
-    'description': ['полное описание', 'описание'],
+    'description': ['полное описание', 'описание', 'наименование'],
     'storage': ['складской статус', 'статус'],
     'price': ['тариф', 'без ндс'],
 }
 
 
 def _find_column(headers: List[str], keywords: List[str]) -> Optional[int]:
-    """Возвращает индекс первой колонки, название которой содержит все ключевые слова."""
+    """Возвращает индекс первой колонки, название которой содержит хотя бы одно ключевое слово."""
     for idx, header in enumerate(headers):
         if header is None:
             continue
         h = str(header).strip().lower()
-        if all(kw in h for kw in keywords):
+        if any(kw in h for kw in keywords):
             return idx
     return None
 
@@ -53,10 +53,11 @@ class AkelParser(IParser):
     """Парсер многолистового Excel прайса AKEL.
 
     Логика:
-    - Заголовки ищутся динамически среди первых 5 строк (ищет 'артикул' + 'тариф'/'без ндс').
-    - Данные начинаются сразу после строки заголовков.
-    - Колонки определяются нечётким поиском.
-    - Листы без колонок article + price пропускаются.
+    - Заголовки ищутся динамически среди первых 5 строк.
+    - Обязательные колонки: article (артикул) + description (полное описание/описание/наименование) + price (тариф/без НДС).
+    - Колонки определяются с приоритетом: основные имена → альтернативы.
+    - Листы без обязательных колонок пропускаются.
+    - Строки без описания пропускаются.
     - Дубликаты артикулов дедуплицируются (берётся первый встреченный).
     """
 
@@ -116,10 +117,19 @@ class AkelParser(IParser):
 
         col_map = self._map_columns(header_row)
 
-        if col_map.get('article') is None or col_map.get('price') is None:
+        # Обязательные колонки: article + description + price
+        missing = []
+        if col_map.get('article') is None:
+            missing.append('article')
+        if col_map.get('description') is None:
+            missing.append('description')
+        if col_map.get('price') is None:
+            missing.append('price')
+
+        if missing:
             logger.debug(
-                "[FIX] AkelParser: лист '%s' — не найдены обязательные колонки (article=%s, price=%s) — пропускаем",
-                sheet_name, col_map.get('article'), col_map.get('price')
+                "[FIX] AkelParser: лист '%s' — не найдены обязательные колонки %s — пропускаем",
+                sheet_name, missing
             )
             return [], False
 
@@ -135,14 +145,22 @@ class AkelParser(IParser):
         return items, True
 
     def _map_columns(self, headers: List[str]) -> Dict[str, Optional[int]]:
+        """Маппинг колонок с приоритетом: основные имена → альтернативы."""
         return {
-            'article': _find_column(headers, _COLUMN_KEYWORDS['article']),
-            'description': _find_column(headers, _COLUMN_KEYWORDS['description'])
-                           or _find_column(headers, ['описание']),
-            'storage': _find_column(headers, _COLUMN_KEYWORDS['storage'])
+            # Артикул: ищем "артикул"
+            'article': _find_column(headers, ['артикул']),
+
+            # Описание: "полное описание" → "описание" → "наименование"
+            'description': _find_column(headers, ['полное описание'])
+                           or _find_column(headers, ['описание'])
+                           or _find_column(headers, ['наименование']),
+
+            # Статус: "складской статус" → "статус"
+            'storage': _find_column(headers, ['складской статус'])
                        or _find_column(headers, ['статус']),
-            'price': _find_column(headers, _COLUMN_KEYWORDS['price'])
-                     or _find_column(headers, ['тариф'])
+
+            # Цена: "тариф" → "без ндс"
+            'price': _find_column(headers, ['тариф'])
                      or _find_column(headers, ['без ндс']),
         }
 
@@ -173,6 +191,10 @@ class AkelParser(IParser):
 
         description = get('description') or ''
         storage = get('storage') or ''
+
+        # Пропускаем строки без описания
+        if not description:
+            return None
 
         try:
             return PriceItem(
