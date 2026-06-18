@@ -120,7 +120,7 @@ class SyncService:
             # Позиции "по запросу" (price=0): разбиваем на новые и существующие
             price_on_request_items = [item for item in new_items if float(item.price) == 0]
             price_on_request_new = [i for i in price_on_request_items if i.article not in all_db_articles]
-            price_on_request_existing = [i.article for i in price_on_request_items if i.article in current_articles]
+            price_on_request_existing = [i for i in price_on_request_items if i.article in current_articles]
 
             # Восстановление disappeared позиций, которые появились в файле
             to_restore = []
@@ -225,8 +225,19 @@ class SyncService:
                 self.repository.add_items(price_on_request_new, synonyms_map=synonyms_map)
                 logger.info(f"💬 Добавлено 'Цена по запросу' (новых): {len(price_on_request_new)}")
             if price_on_request_existing and hasattr(self.repository, 'mark_price_on_request'):
-                self.repository.mark_price_on_request(vendor, price_on_request_existing)
+                # Обновляем PriceText и Price
+                self.repository.mark_price_on_request(vendor, [i.article for i in price_on_request_existing])
                 logger.info(f"💬 Обновлено 'Цена по запросу' (существующих): {len(price_on_request_existing)}")
+
+                # Обновляем описание если изменилось
+                items_to_update_descr = []
+                for item in price_on_request_existing:
+                    old_item = current_items_map.get(item.article)
+                    if old_item and (item.description or '') != (old_item.description or ''):
+                        items_to_update_descr.append(item)
+                if items_to_update_descr:
+                    self.repository.update_items(items_to_update_descr, synonyms_map=synonyms_map)
+                    logger.info(f"📝 Обновлено описание для {len(items_to_update_descr)} 'Цена по запросу'")
 
             if disappeared_articles and mark_disappeared:
                 marked = self.repository.mark_as_disappeared(vendor, disappeared_articles)
