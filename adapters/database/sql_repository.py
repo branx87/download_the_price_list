@@ -1067,6 +1067,78 @@ class SqlRepository(IRepository):
                 )
         return affected
 
+    def bulk_update_article_pc_from_mapping(self, items: list) -> tuple[int, list[dict]]:
+        """
+        Batch UPDATE ArticlePC по маппингу артикул+производитель -> код 1С.
+
+        Ищет по Vendor (LIKE) + Part_Num (нормализованное сравнение).
+        Обновляет ТОЛЬКО если ArticlePC пуст или отличается от нового значения.
+
+        items: list of {article, manufacturer, code}
+
+        Returns:
+            (updated_count, not_found) где not_found — список {article, manufacturer, code}
+        """
+        if not items:
+            return 0, []
+
+        from domain.services.data_normalizer import DataNormalizer
+        start_time = time.time()
+        current_time = datetime.now()
+        updated = 0
+        not_found = []
+
+        for item in items:
+            article_norm = DataNormalizer.normalize_article(item['article'])
+            manufacturer_norm = DataNormalizer.normalize_vendor_name(item['manufacturer'])
+            code = item['code']
+
+            if not article_norm or not manufacturer_norm or not code:
+                continue
+
+            with self.SessionLocal() as session:
+                result = session.execute(text("""
+                    SELECT TOP 1 Vendor, Part_Num, ArticlePC
+                    FROM Total_Price
+                    WHERE LTRIM(RTRIM(Vendor)) = :vendor
+                      AND (REPLACE(REPLACE(REPLACE(Part_Num, ' ', ''), CHAR(9), ''), CHAR(160), '')
+                           = REPLACE(REPLACE(REPLACE(:article, ' ', ''), CHAR(9), ''), CHAR(160), ''))
+                """), {'vendor': manufacturer_norm, 'article': article_norm})
+
+                row = result.fetchone()
+
+                if row is None:
+                    not_found.append(item)
+                    continue
+
+                db_vendor, db_part_num, db_article_pc = row
+                db_article_pc = (db_article_pc or '').strip()
+
+                if db_article_pc == code:
+                    continue
+
+                session.execute(text("""
+                    UPDATE Total_Price
+                    SET ArticlePC = :code,
+                        updated_at = :updated_at
+                    WHERE Vendor = :vendor AND Part_Num = :part_num
+                """), {
+                    'code': code,
+                    'vendor': db_vendor,
+                    'part_num': db_part_num,
+                    'updated_at': current_time,
+                })
+                session.commit()
+                updated += 1
+
+        elapsed = time.time() - start_time
+        logger.info(
+            "[MAPPING] bulk_update_article_pc_from_mapping: "
+            "обновлено=%d, не_найдено=%d, время=%.1fс",
+            updated, len(not_found), elapsed,
+        )
+        return updated, not_found
+
     def get_all_article_pcs(self) -> set:
         """
         Получить все существующие ArticlePC из БД с нормализацией.

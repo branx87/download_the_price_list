@@ -104,7 +104,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /db_copy - Скопировать БД из MSSQL
 /status - Статус
 /debug - Показать ошибки
-/help - Справка"""
+/help - Справка
+
+📎 Файлы:
+- Маппинг кодов 1С (имя: *маппинг* или *mapping*)"""
 
     await update.message.reply_text(text)
 
@@ -405,6 +408,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /status - Статус синхронизаций
 /debug - Показать ошибки
 /help - Справка
+
+📎 Загрузка файлов (отправь файл боту):
+- Маппинг кодов 1С: файл .xls с колонками Артикул, Производитель, Код
+  (имя файла должно содержать «маппинг» или «mapping»)
+- ШИНА: файл .xls с конфигурацией шин
+- Снятые с производства: файл .xlsx/.csv
 
 💡 Используйте /check чтобы посмотреть какие изменения будут при синхронизации"""
 
@@ -1331,6 +1340,46 @@ async def shina_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Ошибка: {str(e)[:300]}")
 
 
+# ─── Маппинг артикул+производитель → код 1С ────────────────────────────────────
+
+async def _handle_mapping_upload(update: Update, file_path):
+    """Загружает маппинг артикул+производитель -> код 1С из Excel (.xls)."""
+    from adapters.parsers.mapping_parser import MappingParser
+
+    msg = await update.message.reply_text("🔄 Загружаю маппинг артикулов...")
+    try:
+        parser = MappingParser()
+        items = parser.parse(file_path)
+
+        if not items:
+            await msg.edit_text("⚠️ Файл не содержит валидных записей.")
+            return
+
+        repository = SqlRepository(settings.DATABASE_URL)
+        updated, not_found = await asyncio.get_event_loop().run_in_executor(
+            None, repository.bulk_update_article_pc_from_mapping, items
+        )
+
+        lines = [
+            f"✅ <b>Маппинг загружен!</b>\n",
+            f"📥 Записей в файле: {len(items)}",
+            f"🔗 Обновлено ArticlePC: {updated}",
+        ]
+        if not_found:
+            lines.append(f"⚠️ Не найдено в БД: {len(not_found)}")
+            for nf in not_found[:10]:
+                lines.append(f"  • {nf['manufacturer']} | {nf['article']}")
+            if len(not_found) > 10:
+                lines.append(f"  ... и ещё {len(not_found) - 10}")
+
+        await msg.edit_text("\n".join(lines), parse_mode='HTML')
+        logger.info("[MAPPING] upload: total=%d updated=%d not_found=%d",
+                    len(items), updated, len(not_found))
+    except Exception as e:
+        logger.error("[MAPPING] _handle_mapping_upload: %s", e, exc_info=True)
+        await msg.edit_text(f"❌ Ошибка загрузки маппинга:\n{str(e)[:300]}")
+
+
 # ─── Загрузка прайса через файл ───────────────────────────────────────────────
 
 # Карта ключевых слов в имени файла → имя вендора в реестре
@@ -1440,6 +1489,16 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         tg_file = await context.bot.get_file(doc.file_id)
         await tg_file.download_to_drive(str(dest_path))
         await _handle_discontinued_upload(update, dest_path)
+        return
+
+    # Файл маппинга артикулов (код 1С)
+    is_mapping = any(kw in filename.lower() for kw in ('маппинг', 'mapping', 'код1с', 'код_1с'))
+    if is_mapping:
+        settings.PRICE_FILES_DIR.mkdir(parents=True, exist_ok=True)
+        dest_path = settings.PRICE_FILES_DIR / filename
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(str(dest_path))
+        await _handle_mapping_upload(update, dest_path)
         return
 
     # Определяем вендора по имени файла
