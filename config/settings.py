@@ -56,6 +56,15 @@ class Settings:
             return set()
         return {t.strip() for t in raw.split(',') if t.strip()}
 
+    # Производители из 1C, которых НЕ нужно заносить в БД.
+    # Пример: ERP_SKIP_MANUFACTURERS=ШИНА,RSVET,МЕКО,MEKO,ООО "ЕРС-КОМПЛЕКТ"
+    @property
+    def ERP_SKIP_MANUFACTURERS(self) -> set[str]:
+        raw = os.getenv('ERP_SKIP_MANUFACTURERS', '')
+        if not raw:
+            return set()
+        return {m.strip().lower() for m in raw.split(',') if m.strip()}
+
     # Доступ: список Telegram user ID через запятую
     @property
     def ADMIN_IDS(self) -> set[int]:

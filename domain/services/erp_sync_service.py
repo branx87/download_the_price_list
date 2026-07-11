@@ -47,7 +47,19 @@ class ErpSyncService:
                 if skipped:
                     logger.info(f"[ERP] Пропущено по типу номенклатуры: {skipped} из {before}")
 
-            # 3. Проверяем дубликаты по code
+            # 3. Фильтруем по производителю (ERP_SKIP_MANUFACTURERS)
+            skip_manufacturers = settings.ERP_SKIP_MANUFACTURERS
+            if skip_manufacturers:
+                before = len(raw_items)
+                raw_items = [
+                    i for i in raw_items
+                    if (i.get('manufacturer') or '').strip().lower() not in skip_manufacturers
+                ]
+                skipped = before - len(raw_items)
+                if skipped:
+                    logger.info(f"[ERP] Пропущено по производителю: {skipped} из {before}")
+
+            # 4. Проверяем дубликаты по code
             unique_items, duplicate_codes = self._check_duplicates(raw_items)
             result.duplicate_codes = duplicate_codes
             result.skipped_duplicates = len(raw_items) - len(unique_items)
@@ -59,7 +71,7 @@ class ErpSyncService:
                 if len(duplicate_codes) > 10:
                     logger.warning(f"  ... и ещё {len(duplicate_codes) - 10}")
 
-            # 4. Загружаем маппинг синонимов для VendorForFilter
+            # 5. Загружаем маппинг синонимов для VendorForFilter
             # Ключи нормализуем в uppercase — иначе vendor_norm (всегда upper) не найдёт
             # синоним с raw-ключом типа 'Овен' или 'КМ-профиль'
             synonyms_map = {}
@@ -71,7 +83,7 @@ class ErpSyncService:
                 }
                 logger.debug(f"[FIX] synonyms_map загружен: {len(synonyms_map)} записей (ключи нормализованы)")
 
-            # 4. Загружаем существующие данные из БД для быстрого поиска
+            # 6. Загружаем существующие данные из БД для быстрого поиска
             logger.debug("Загрузка существующих ArticlePC из БД...")
             existing_article_pcs = self.repository.get_all_article_pcs()
             logger.debug(f"В БД найдено {len(existing_article_pcs)} ArticlePC")
@@ -125,7 +137,7 @@ class ErpSyncService:
                 if apc_upper
             }
 
-            # 4. Классифицируем позиции
+            # 7. Классифицируем позиции
             to_insert = []
             to_update_article_pc = []
             to_update_raw_values = []
@@ -299,7 +311,7 @@ class ErpSyncService:
                         f"новых: {result.added}, привязок: {result.updated}, пропущено: {result.skipped_existing}"
                     )
 
-            # 5. Применяем изменения в БД
+            # 8. Применяем изменения в БД
             if to_update_article_pc:
                 logger.info(f"Обновление ArticlePC для {len(to_update_article_pc)} позиций...")
                 self.repository.bulk_set_article_pc(to_update_article_pc)
