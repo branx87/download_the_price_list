@@ -56,6 +56,17 @@ class Settings:
             return set()
         return {t.strip() for t in raw.split(',') if t.strip()}
 
+    # Типы номенклатуры из 1C, которые НУЖНО заносить в БД (allow list).
+    # Если задан — пропускаются ТОЛЬКО перечисленные виды, остальные отсекаются.
+    # Приоритет: ERP_ALLOWED_ITEM_TYPES > ERP_SKIP_ITEM_TYPES
+    # Пример: ERP_ALLOWED_ITEM_TYPES=Сырье и материалы (10.01),Лакокрасочные материалы (ЛКМ) (10.06)
+    @property
+    def ERP_ALLOWED_ITEM_TYPES(self) -> set[str]:
+        raw = os.getenv('ERP_ALLOWED_ITEM_TYPES', '')
+        if not raw:
+            return set()
+        return {t.strip() for t in raw.split(',') if t.strip()}
+
     # Производители из 1C, которых НЕ нужно заносить в БД.
     # Пример: ERP_SKIP_MANUFACTURERS=ШИНА,RSVET,МЕКО,MEKO,ООО "ЕРС-КОМПЛЕКТ"
     @property

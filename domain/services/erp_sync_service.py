@@ -38,14 +38,23 @@ class ErpSyncService:
             result.total_received = len(raw_items)
             logger.info(f"Получено {len(raw_items)} позиций из 1C-ERP")
 
-            # 2. Фильтруем по типу номенклатуры (ERP_SKIP_ITEM_TYPES)
+            # 2. Фильтруем по типу номенклатуры
+            #    ERP_ALLOWED_ITEM_TYPES (allow list) — приоритетнее
+            #    ERP_SKIP_ITEM_TYPES (skip list) — используется если allow list не задан
+            allowed_types = settings.ERP_ALLOWED_ITEM_TYPES
             skip_types = settings.ERP_SKIP_ITEM_TYPES
-            if skip_types:
+            if allowed_types:
+                before = len(raw_items)
+                raw_items = [i for i in raw_items if i.get('item_type', '') in allowed_types]
+                skipped = before - len(raw_items)
+                if skipped:
+                    logger.info(f"[ERP] Пропущено по типу номенклатуры (allow list): {skipped} из {before}")
+            elif skip_types:
                 before = len(raw_items)
                 raw_items = [i for i in raw_items if i.get('item_type', '') not in skip_types]
                 skipped = before - len(raw_items)
                 if skipped:
-                    logger.info(f"[ERP] Пропущено по типу номенклатуры: {skipped} из {before}")
+                    logger.info(f"[ERP] Пропущено по типу номенклатуры (skip list): {skipped} из {before}")
 
             # 3. Фильтруем по производителю (ERP_SKIP_MANUFACTURERS)
             skip_manufacturers = settings.ERP_SKIP_MANUFACTURERS
