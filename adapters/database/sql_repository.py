@@ -1071,8 +1071,7 @@ class SqlRepository(IRepository):
         """
         Batch UPDATE ArticlePC по маппингу артикул+производитель -> код 1С.
 
-        Ищет по Vendor (LIKE) + Part_Num (нормализованное сравнение).
-        Обновляет ТОЛЬКО если ArticlePC пуст или отличается от нового значения.
+        Оптимизировано: загружает все Vendor+Part_Num в память, ищет без запросов к БД.
 
         items: list of {article, manufacturer, code}
 
@@ -1085,9 +1084,27 @@ class SqlRepository(IRepository):
         from domain.services.data_normalizer import DataNormalizer
         start_time = time.time()
         current_time = datetime.now()
-        updated = 0
-        not_found = []
 
+        # 1. Загружаем все Vendor+Part_Num+ArticlePC из БД в память
+        logger.info("[MAPPING] Загрузка данных из БД...")
+        with self.SessionLocal() as session:
+            result = session.execute(text(
+                "SELECT Vendor, Part_Num, ArticlePC FROM Total_Price"
+            ))
+            # Строим lookup: (norm_vendor, norm_part_num) -> (vendor_raw, part_num_raw, article_pc_raw)
+            db_lookup = {}
+            for row in result:
+                vendor_raw, part_num_raw, article_pc_raw = row
+                vendor_norm = DataNormalizer.normalize_vendor_name(vendor_raw or '')
+                part_num_norm = DataNormalizer.normalize_article(part_num_raw or '')
+                if vendor_norm and part_num_norm:
+                    key = (vendor_norm, part_num_norm)
+                    db_lookup[key] = (vendor_raw, part_num_raw, (article_pc_raw or '').strip())
+            logger.info(f"[MAPPING] Загружено {len(db_lookup)} записей из БД за {time.time() - start_time:.1f}с")
+
+        # 2. Ищем совпадения и собираем UPDATE
+        to_update = []
+        not_found = []
         for item in items:
             article_norm = DataNormalizer.normalize_article(item['article'])
             manufacturer_norm = DataNormalizer.normalize_vendor_name(item['manufacturer'])
@@ -1096,48 +1113,72 @@ class SqlRepository(IRepository):
             if not article_norm or not manufacturer_norm or not code:
                 continue
 
+            key = (manufacturer_norm, article_norm)
+            if key not in db_lookup:
+                not_found.append(item)
+                continue
+
+            db_vendor, db_part_num, db_article_pc = db_lookup[key]
+            if db_article_pc == code:
+                continue
+
+            to_update.append({
+                'code': code,
+                'vendor': db_vendor,
+                'part_num': db_part_num,
+                'updated_at': current_time,
+            })
+            # Обновляем кэш чтобы не обновлять дважды
+            db_lookup[key] = (db_vendor, db_part_num, code)
+
+        logger.info(f"[MAPPING] Поиск завершён: совпадений={len(to_update)}, не_найдено={len(not_found)}, время={time.time() - start_time:.1f}с")
+
+        # 3. Bulk UPDATE через temp table
+        if to_update:
+            update_start = time.time()
             with self.SessionLocal() as session:
-                result = session.execute(text("""
-                    SELECT TOP 1 Vendor, Part_Num, ArticlePC
-                    FROM Total_Price
-                    WHERE LTRIM(RTRIM(Vendor)) = :vendor
-                      AND (REPLACE(REPLACE(REPLACE(Part_Num, ' ', ''), CHAR(9), ''), CHAR(160), '')
-                           = REPLACE(REPLACE(REPLACE(:article, ' ', ''), CHAR(9), ''), CHAR(160), ''))
-                """), {'vendor': manufacturer_norm, 'article': article_norm})
-
-                row = result.fetchone()
-
-                if row is None:
-                    not_found.append(item)
-                    continue
-
-                db_vendor, db_part_num, db_article_pc = row
-                db_article_pc = (db_article_pc or '').strip()
-
-                if db_article_pc == code:
-                    continue
-
-                session.execute(text("""
-                    UPDATE Total_Price
-                    SET ArticlePC = :code,
-                        updated_at = :updated_at
-                    WHERE Vendor = :vendor AND Part_Num = :part_num
-                """), {
-                    'code': code,
-                    'vendor': db_vendor,
-                    'part_num': db_part_num,
-                    'updated_at': current_time,
-                })
+                if self.is_sqlite:
+                    session.execute(text(
+                        "CREATE TEMPORARY TABLE IF NOT EXISTS tmp_mapping_update "
+                        "(code TEXT, vendor TEXT, part_num TEXT, updated_at TEXT)"
+                    ))
+                    session.execute(text("DELETE FROM tmp_mapping_update"))
+                    session.executemany(
+                        "INSERT INTO tmp_mapping_update VALUES (:code, :vendor, :part_num, :updated_at)",
+                        to_update
+                    )
+                    session.execute(text("""
+                        UPDATE Total_Price
+                        SET ArticlePC = tmp.code, updated_at = tmp.updated_at
+                        FROM Total_Price tp
+                        JOIN tmp_mapping_update tmp ON tp.Vendor = tmp.vendor AND tp.Part_Num = tmp.part_num
+                    """))
+                else:
+                    session.execute(text(
+                        "CREATE TABLE #mapping_update "
+                        "(code NVARCHAR(50), vendor NVARCHAR(250), part_num NVARCHAR(250), updated_at DATETIME)"
+                    ))
+                    session.executemany(
+                        "INSERT INTO #mapping_update VALUES (:code, :vendor, :part_num, :updated_at)",
+                        to_update
+                    )
+                    session.execute(text("""
+                        UPDATE tp
+                        SET tp.ArticlePC = tmp.code, tp.updated_at = tmp.updated_at
+                        FROM Total_Price tp
+                        JOIN #mapping_update tmp ON tp.Vendor = tmp.vendor AND tp.Part_Num = tmp.part_num
+                    """))
+                    session.execute(text("DROP TABLE #mapping_update"))
                 session.commit()
-                updated += 1
+            logger.info(f"[MAPPING] bulk_update: {len(to_update)} обновлено за {time.time() - update_start:.1f}с")
 
         elapsed = time.time() - start_time
         logger.info(
             "[MAPPING] bulk_update_article_pc_from_mapping: "
             "обновлено=%d, не_найдено=%d, время=%.1fс",
-            updated, len(not_found), elapsed,
+            len(to_update), len(not_found), elapsed,
         )
-        return updated, not_found
+        return len(to_update), not_found
 
     def get_all_article_pcs(self) -> set:
         """

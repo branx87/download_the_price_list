@@ -34,23 +34,19 @@ class MappingParser:
                 f"Фактические колонки: {', '.join(actual_cols)}"
             )
 
-        items = []
-        skipped = 0
+        # Vectorized операции вместо iterrows()
+        articles = df['Артикул'].apply(self._safe_str)
+        manufacturers = df['Производитель'].apply(self._safe_str)
+        codes = df['Код'].apply(self._safe_str)
 
-        for _, row in df.iterrows():
-            article_raw = self._safe_str(row.get('Артикул', ''))
-            manufacturer_raw = self._safe_str(row.get('Производитель', ''))
-            code_raw = self._safe_str(row.get('Код', ''))
+        # Фильтруем пустые строки
+        mask = articles.astype(bool) & manufacturers.astype(bool) & codes.astype(bool)
+        skipped = int((~mask).sum())
 
-            if not article_raw or not manufacturer_raw or not code_raw:
-                skipped += 1
-                continue
-
-            items.append({
-                'article': article_raw,
-                'manufacturer': manufacturer_raw.upper(),
-                'code': code_raw,
-            })
+        items = [
+            {'article': a, 'manufacturer': m.upper(), 'code': c}
+            for a, m, c in zip(articles[mask], manufacturers[mask], codes[mask])
+        ]
 
         logger.info(
             "[MAPPING] Парсер: позиций=%d, пропущено=%d (пустые поля)",
