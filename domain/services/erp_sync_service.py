@@ -45,28 +45,52 @@ class ErpSyncService:
             skip_types = settings.ERP_SKIP_ITEM_TYPES
             if allowed_types:
                 before = len(raw_items)
-                raw_items = [i for i in raw_items if i.get('item_type', '') in allowed_types]
-                skipped = before - len(raw_items)
-                if skipped:
-                    logger.info(f"[ERP] Пропущено по типу номенклатуры (allow list): {skipped} из {before}")
+                kept = [i for i in raw_items if i.get('item_type', '') in allowed_types]
+                skipped_items = [i for i in raw_items if i.get('item_type', '') not in allowed_types]
+                raw_items = kept
+                if skipped_items:
+                    logger.info(f"[ERP] Пропущено по типу номенклатуры (allow list): {len(skipped_items)} из {before}")
+                    skipped_types = {}
+                    for item in skipped_items:
+                        t = item.get('item_type', '(пусто)')
+                        skipped_types[t] = skipped_types.get(t, 0) + 1
+                    for t, cnt in sorted(skipped_types.items()):
+                        logger.info(f"[ERP]   - {t}: {cnt} шт")
             elif skip_types:
                 before = len(raw_items)
-                raw_items = [i for i in raw_items if i.get('item_type', '') not in skip_types]
-                skipped = before - len(raw_items)
-                if skipped:
-                    logger.info(f"[ERP] Пропущено по типу номенклатуры (skip list): {skipped} из {before}")
+                kept = [i for i in raw_items if i.get('item_type', '') not in skip_types]
+                skipped_items = [i for i in raw_items if i.get('item_type', '') in skip_types]
+                raw_items = kept
+                if skipped_items:
+                    logger.info(f"[ERP] Пропущено по типу номенклатуры (skip list): {len(skipped_items)} из {before}")
+                    skipped_types = {}
+                    for item in skipped_items:
+                        t = item.get('item_type', '(пусто)')
+                        skipped_types[t] = skipped_types.get(t, 0) + 1
+                    for t, cnt in sorted(skipped_types.items()):
+                        logger.info(f"[ERP]   - {t}: {cnt} шт")
 
             # 3. Фильтруем по производителю (ERP_SKIP_MANUFACTURERS)
             skip_manufacturers = settings.ERP_SKIP_MANUFACTURERS
             if skip_manufacturers:
                 before = len(raw_items)
-                raw_items = [
+                kept = [
                     i for i in raw_items
                     if (i.get('manufacturer') or '').strip().lower() not in skip_manufacturers
                 ]
-                skipped = before - len(raw_items)
-                if skipped:
-                    logger.info(f"[ERP] Пропущено по производителю: {skipped} из {before}")
+                skipped_items = [
+                    i for i in raw_items
+                    if (i.get('manufacturer') or '').strip().lower() in skip_manufacturers
+                ]
+                raw_items = kept
+                if skipped_items:
+                    logger.info(f"[ERP] Пропущено по производителю: {len(skipped_items)} из {before}")
+                    skipped_mfrs = {}
+                    for item in skipped_items:
+                        m = item.get('manufacturer', '(пусто)')
+                        skipped_mfrs[m] = skipped_mfrs.get(m, 0) + 1
+                    for m, cnt in sorted(skipped_mfrs.items()):
+                        logger.info(f"[ERP]   - {m}: {cnt} шт")
 
             # 4. Проверяем дубликаты по code
             unique_items, duplicate_codes = self._check_duplicates(raw_items)
