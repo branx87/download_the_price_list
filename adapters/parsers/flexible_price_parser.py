@@ -109,6 +109,14 @@ ROLE_PRIORITY: List[str] = [
     'currency',
 ]
 
+# Кандидаты для price-фолбэка — только колонки, означающие цену ЕДИНИЦЫ
+# (не «Стоимость с НДС» = цена × количество, и не «ндс» в общем смысле).
+# «Тариф» и «без НДС» — это цена за штуку, безопасные как фолбэк.
+PRICE_FALLBACK_KEYWORDS: List[str] = [
+    'тариф',
+    'без ндс',
+]
+
 
 def _normalize_header(value: Any) -> str:
     if value is None:
@@ -299,6 +307,10 @@ class FlexiblePriceParser(IParser):
         и каждая найденная колонка помечается занятой — более поздние роли
         её уже не подхватят. Это решает конфликт «Артикул РС» vs «Артикул»:
         первый уходит в code_1c, второй — в article.
+
+        Для price дополнительно ищется вторая кандидат-колонка (фолбэк):
+        если в строке «Цена с НДС, руб» пустая, парсер попробует «Тариф».
+        Обе колонки исключаются из used, чтобы другие роли их не перехватили.
         """
         result: Dict[str, Optional[int]] = {}
         used: Set[int] = set()
@@ -310,6 +322,20 @@ class FlexiblePriceParser(IParser):
             result[role] = idx
             if idx is not None:
                 used.add(idx)
+
+        # price: ищем дополнительную колонку-фолбэк (например, «Тариф» —
+        # когда «Цена с НДС, руб» найдена как основная, но в данных бывает
+        # пустой). Используем только PRICE_FALLBACK_KEYWORDS — безопасные
+        # колонки цены единицы, не «Стоимость с НДС» (= цена × количество).
+        price_main = result.get('price')
+        price_fallback: Optional[int] = None
+        if price_main is not None:
+            skip = used | ({price_main})
+            idx = _find_column(headers, PRICE_FALLBACK_KEYWORDS, used=skip)
+            if idx is not None:
+                price_fallback = idx
+        result['price_fallback'] = price_fallback
+
         return result
 
     def map_columns(self, headers: List[str]) -> Dict[str, Optional[int]]:
@@ -345,8 +371,19 @@ class FlexiblePriceParser(IParser):
         if not article or article in ('NAN', 'NONE'):
             return None
 
+        # Price: берём первое непустое значение из основной колонки,
+        # иначе из фолбэка (например, «Тариф» когда «Цена с НДС, руб» пуста).
         price_idx = col_map.get('price')
-        raw_price = row[price_idx] if price_idx is not None and price_idx < len(row) else None
+        price_fb_idx = col_map.get('price_fallback')
+        raw_price = None
+        for idx in (price_idx, price_fb_idx):
+            if idx is not None and idx < len(row):
+                v = row[idx]
+                if v is not None and str(v).strip():
+                    raw_price = v
+                    break
+        if raw_price is None and price_idx is not None and price_idx < len(row):
+            raw_price = row[price_idx]  # оставим None, чтобы поймать «по запросу»
         price = _clean_price(raw_price)
         if price is None:
             if _is_price_on_request(raw_price):

@@ -199,6 +199,56 @@ def test_missing_required(normalizer: ArticleNormalizer) -> bool:
     return ok
 
 
+def test_registry_passes_config(normalizer: ArticleNormalizer) -> bool:
+    """VendorRegistry.create_parser должен передавать parser_config в парсер.
+
+    Регрессия: раньше create_parser вызывал parser_class() без аргументов,
+    из-за чего vendor_from_column из конфига терялся и в БД писался
+    vendor='GENERIC' вместо реального производителя из файла.
+
+    Skip: требует импорт vendors.registry, который тянет pandas через
+    adapters.parsers.excel_parser. Если окружение сломано (например,
+    numpy несовместим с Python) — пропускаем.
+    """
+    print(f'\n{YELLOW}=== test_registry_passes_config ==={RESET}')
+    try:
+        from vendors.registry import VendorRegistry
+    except Exception as e:
+        print(f'  {YELLOW}[SKIP]{RESET} vendors.registry не импортируется: {type(e).__name__}: {e}')
+        return True
+
+    registry = VendorRegistry(PROJECT_ROOT / 'price_files', normalizer)
+    parser = registry.create_parser('GENERIC')
+
+    ok = True
+    ok &= _check(
+        'create_parser(GENERIC) вернул FlexiblePriceParser',
+        type(parser).__name__ == 'FlexiblePriceParser',
+        detail=type(parser).__name__,
+    )
+    ok &= _check(
+        'vendor_from_column=True из реестра',
+        getattr(parser, 'vendor_from_column', None) is True,
+        detail=str(getattr(parser, 'vendor_from_column', None)),
+    )
+    ok &= _check(
+        'default_vendor=GENERIC из реестра',
+        getattr(parser, 'default_vendor', None) == 'GENERIC',
+        detail=str(getattr(parser, 'default_vendor', None)),
+    )
+
+    # Реальный парсинг через registry-созданный парсер на sample_format1:
+    # vendor должен подхватиться из «Производитель» = «IEK», не 'GENERIC'.
+    items = parser.parse(FIXTURES_DIR / 'sample_format1.xlsx', vendor='GENERIC')
+    vendors = {i.vendor for i in items}
+    ok &= _check(
+        'vendor подхвачен из «Производитель», а не GENERIC',
+        vendors == {'IEK'},
+        detail=str(vendors),
+    )
+    return ok
+
+
 def test_real_price_mp(normalizer: ArticleNormalizer) -> bool:
     """Реальный файл «Прайс МП.xlsx» из price_files/ — регрессионный кейс.
 
@@ -231,8 +281,8 @@ def test_real_price_mp(normalizer: ArticleNormalizer) -> bool:
         detail=str(stats),
     )
     ok &= _check(
-        'Позиций > 0 (раньше было 0)',
-        len(items) > 0,
+        'Позиций 183 (= строкам данных в файле)',
+        len(items) == 183,
         detail=f'len={len(items)}',
     )
     ok &= _check(
@@ -245,8 +295,8 @@ def test_real_price_mp(normalizer: ArticleNormalizer) -> bool:
         all(i.article for i in items),
     )
     ok &= _check(
-        'Цена > 0 хотя бы у одной позиции',
-        any(float(i.price) > 0 for i in items),
+        'Цены > 0 у всех (price_fallback подхватил «Тариф» где «Цена с НДС» пуста)',
+        all(float(i.price) > 0 for i in items),
     )
     return ok
 
@@ -362,6 +412,7 @@ def main() -> int:
         test_mixed(normalizer),
         test_vendor_override(normalizer),
         test_missing_required(normalizer),
+        test_registry_passes_config(normalizer),
         test_real_price_mp(normalizer),
         test_column_priority(normalizer),
     ]

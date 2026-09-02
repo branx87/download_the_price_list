@@ -227,12 +227,19 @@ class VendorRegistry:
         return config.downloader_class(**config.downloader_params)
 
     def create_parser(self, vendor: str):
-        """Создать парсер для вендора"""
+        """Создать парсер для вендора.
+
+        Для кастомных парсеров (parser_class) прокидывает parser_config и
+        normalizer в конструктор: `parser_class(parser_config, normalizer)`.
+        Без этого parser_config из реестра теряется и парсер работает
+        с дефолтными настройками (например, vendor_from_column=False вместо
+        ожидаемого True для GENERIC — vendor всегда «GENERIC» в БД).
+        """
         config = self._vendors.get(vendor)
         if not config:
             raise ValueError(f"Неизвестный вендор: {vendor}")
 
         if config.parser_class is not None:
-            return config.parser_class()
+            return config.parser_class(config.parser_config, self.normalizer)
 
         return ExcelParser(config.parser_config, self.normalizer)
