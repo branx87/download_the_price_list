@@ -11,6 +11,7 @@ from adapters.downloaders.owen_downloader import OwenDownloader
 from adapters.downloaders.upload_downloader import UploadDownloader
 from adapters.parsers.excel_parser import ExcelParser
 from adapters.parsers.akel_parser import AkelParser
+from adapters.parsers.flexible_price_parser import FlexiblePriceParser
 from utils.normalizer import ArticleNormalizer
 from adapters.downloaders.dkc_downloader import DkcDownloader
 
@@ -193,6 +194,23 @@ class VendorRegistry:
                 downloader_params={},
                 parser_config={},
                 parser_class=AkelParser,
+            ),
+
+            # ========== GENERIC (универсальный парсер для прайсов с произвольными колонками) ==========
+            # Триггер: ключевое слово 'generic' в имени файла (см. _FILENAME_VENDOR_MAP в bot/handlers.py).
+            # Вендор берётся из колонки 'Производитель' (vendor_from_column=True).
+            # Если колонки нет — используется default_vendor из конфига.
+            'GENERIC': VendorConfig(
+                name='GENERIC',
+                downloader_class=UploadDownloader,
+                downloader_params={},
+                parser_config={
+                    'vendor_from_column': True,
+                    'default_vendor': 'GENERIC',
+                    # column_aliases можно переопределить здесь, но дефолт из FlexiblePriceParser
+                    # уже покрывает оба формата, описанных в задаче.
+                },
+                parser_class=FlexiblePriceParser,
             ),
         }
 
