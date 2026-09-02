@@ -38,8 +38,11 @@ logger = logging.getLogger(__name__)
 
 # Стандартные алиасы колонок (приоритет: первое совпадение выигрывает).
 # Все сравнения — case-insensitive substring match.
+# Важно: «код» в прайсе обычно = код 1С (ArticlePC), а не артикул.
+# А «Артикул РС» — тоже код 1С. Поэтому «код» и «артикул рс» живут в code_1c,
+# а не в article. Распределение ролей решается приоритетом ролей в _map_columns.
 DEFAULT_ALIASES: Dict[str, List[str]] = {
-    'article': ['артикул', 'код'],
+    'article': ['артикул'],
     'description': [
         'наименование для печати',  # приоритет у "для печати"
         'наименование',
@@ -67,9 +70,11 @@ DEFAULT_ALIASES: Dict[str, List[str]] = {
         'марка',
     ],
     'code_1c': [
+        'артикул рс',  # самый специфичный — должен перебить «артикул» в article
         'код 1с',
         'код1с',
         'артикул 1с',
+        'код',         # голое «Код» в прайсе = код 1С (ArticlePC)
     ],
     'quantity': [
         'кол-во',
@@ -89,6 +94,20 @@ DEFAULT_OPTIONAL: Set[str] = {
     'description', 'units', 'manufacturer', 'code_1c', 'quantity', 'currency',
 }
 
+# Порядок приоритета ролей при маппинге колонок: более специфичные проверяются
+# раньше и помечают колонку "занятой". Это нужно, чтобы «Артикул РС» ушёл в
+# code_1c, а не в article (т.к. содержит подстроку «артикул»).
+ROLE_PRIORITY: List[str] = [
+    'code_1c',       # «Артикул РС» / «Код 1С» / «Код» — сначала
+    'article',       # затем «Артикул»
+    'description',
+    'price',
+    'units',
+    'manufacturer',
+    'quantity',
+    'currency',
+]
+
 
 def _normalize_header(value: Any) -> str:
     if value is None:
@@ -96,10 +115,22 @@ def _normalize_header(value: Any) -> str:
     return str(value).strip().lower()
 
 
-def _find_column(headers: List[str], keywords: List[str]) -> Optional[int]:
+def _find_column(
+    headers: List[str],
+    keywords: List[str],
+    used: Optional[Set[int]] = None,
+) -> Optional[int]:
     """Возвращает индекс первой колонки, заголовок которой содержит
-    хотя бы одно ключевое слово (case-insensitive substring)."""
+    хотя бы одно ключевое слово (case-insensitive substring).
+
+    Параметр `used` — множество уже занятых индексов; такие колонки
+    пропускаются. Это нужно для приоритизации ролей: если «Код» уже
+    ушёл в code_1c, то article его не перебьёт.
+    """
+    skipped = used or set()
     for idx, header in enumerate(headers):
+        if idx in skipped:
+            continue
         h = _normalize_header(header)
         if not h:
             continue
@@ -245,11 +276,32 @@ class FlexiblePriceParser(IParser):
         return items, True
 
     def _map_columns(self, headers: List[str]) -> Dict[str, Optional[int]]:
+        """Маппит заголовки на роли с учётом приоритета ролей.
+
+        Сначала проверяются более специфичные роли (code_1c раньше article),
+        и каждая найденная колонка помечается занятой — более поздние роли
+        её уже не подхватят. Это решает конфликт «Артикул РС» vs «Артикул»:
+        первый уходит в code_1c, второй — в article.
+        """
         result: Dict[str, Optional[int]] = {}
-        for role, kws in self.aliases.items():
-            if role in self.required or role in self.optional:
-                result[role] = _find_column(headers, kws)
+        used: Set[int] = set()
+        for role in ROLE_PRIORITY:
+            kws = self.aliases.get(role, [])
+            if not kws:
+                continue
+            idx = _find_column(headers, kws, used=used)
+            result[role] = idx
+            if idx is not None:
+                used.add(idx)
         return result
+
+    def map_columns(self, headers: List[str]) -> Dict[str, Optional[int]]:
+        """Публичная обёртка над _map_columns — для отладки и тестов.
+
+        Принимает список заголовков колонок (case-insensitive),
+        возвращает словарь {роль: индекс колонки или None}.
+        """
+        return self._map_columns([_normalize_header(h) for h in headers])
 
     def _parse_row(
         self,

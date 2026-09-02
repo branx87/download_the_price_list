@@ -194,6 +194,59 @@ def test_missing_required(normalizer: ArticleNormalizer) -> bool:
     return ok
 
 
+def test_column_priority(normalizer: ArticleNormalizer) -> bool:
+    """«Код» и «Артикул РС» уходят в code_1c, а не в article.
+
+    Без приоритизации ролей «Артикул РС» подпал бы под article (содержит
+    «артикул»), что неверно — это код 1С (ArticlePC).
+    """
+    print(f'\n{YELLOW}=== test_column_priority ==={RESET}')
+    parser = FlexiblePriceParser(
+        {'vendor_from_column': True, 'default_vendor': 'GENERIC'},
+        normalizer,
+    )
+
+    # Случай 1: «Код» в одной колонке с «Артикул»
+    headers = ['Производитель', 'Артикул', 'Код', 'Наименование', 'Тариф']
+    col_map = parser.map_columns(headers)
+    print(f'  headers={headers}')
+    print(f'  col_map={col_map}')
+    ok = True
+    ok &= _check(
+        '«Артикул» → article',
+        col_map.get('article') == 1,
+        detail=f'article={col_map.get("article")}',
+    )
+    ok &= _check(
+        '«Код» → code_1c (а не article)',
+        col_map.get('code_1c') == 2,
+        detail=f'code_1c={col_map.get("code_1c")}',
+    )
+    ok &= _check(
+        '«Тариф» → price',
+        col_map.get('price') == 4,
+        detail=f'price={col_map.get("price")}',
+    )
+
+    # Случай 2: «Артикул РС» и «Артикул» рядом — РС уходит в code_1c
+    headers2 = ['Производитель', 'Артикул', 'Артикул РС', 'Наименование', 'Тариф']
+    col_map2 = parser.map_columns(headers2)
+    print(f'\n  headers={headers2}')
+    print(f'  col_map={col_map2}')
+    ok &= _check(
+        '«Артикул РС» → code_1c',
+        col_map2.get('code_1c') == 2,
+        detail=f'code_1c={col_map2.get("code_1c")}',
+    )
+    ok &= _check(
+        '«Артикул» (без РС) → article',
+        col_map2.get('article') == 1,
+        detail=f'article={col_map2.get("article")}',
+    )
+
+    return ok
+
+
 def main() -> int:
     _ensure_fixtures()
 
@@ -204,6 +257,7 @@ def main() -> int:
         test_mixed(normalizer),
         test_vendor_override(normalizer),
         test_missing_required(normalizer),
+        test_column_priority(normalizer),
     ]
 
     print(f'\n{YELLOW}{"=" * 50}{RESET}')
