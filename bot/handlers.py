@@ -1398,13 +1398,19 @@ _UPLOAD_VENDORS = list(_FILENAME_VENDOR_MAP.values())
 _MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB — ограничение Telegram Bot API
 
 
-def detect_vendor_from_filename(filename: str) -> str | None:
-    """Определяет вендора по ключевым словам в имени файла."""
+def detect_vendor_from_filename(filename: str) -> str:
+    """Определяет вендора по ключевым словам в имени файла.
+
+    Если ни одно ключевое слово не нашлось — возвращает 'GENERIC'.
+    Это безопасный фолбэк: generic-парсер сам упадёт, если в файле
+    не окажется обязательных колонок (article + price), и пользователь
+    увидит понятную ошибку.
+    """
     lower = filename.lower()
     for keyword, vendor in _FILENAME_VENDOR_MAP.items():
         if keyword in lower:
             return vendor
-    return None
+    return 'GENERIC'
 
 
 async def _handle_shina_upload(update: Update, file_path):
@@ -1502,17 +1508,9 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await _handle_mapping_upload(update, dest_path)
         return
 
-    # Определяем вендора по имени файла
+    # Определяем вендора по имени файла (с фолбэком на GENERIC).
+    # Если ни одно ключевое слово не нашлось — попробуем generic-парсер.
     vendor = detect_vendor_from_filename(filename)
-    if vendor is None:
-        vendors_hint = ', '.join(_UPLOAD_VENDORS)
-        await update.message.reply_text(
-            f"⚠️ Не удалось определить вендора по имени файла: <b>{filename}</b>\n\n"
-            f"Поддерживаемые вендоры (загрузка файлом): {vendors_hint}\n"
-            f"Имя файла должно содержать ключевое слово вендора.",
-            parse_mode='HTML',
-        )
-        return
 
     await update.message.reply_text(f"📥 Получен файл <b>{filename}</b>\nВендор: <b>{vendor}</b>\nНачинаю синхронизацию...", parse_mode='HTML')
 

@@ -357,6 +357,10 @@ class FlexiblePriceParser(IParser):
 
         description = self.data_normalizer.normalize_description(description)
 
+        # Код 1С (опционально). Достаётся, только если колонка найдена
+        # в шапке; иначе остаётся пустым и в БД не пишется.
+        code_1c = (cell('code_1c') or '').strip()
+
         try:
             return PriceItem(
                 vendor=vendor,
@@ -365,6 +369,7 @@ class FlexiblePriceParser(IParser):
                 price=price,
                 units=units,
                 storage='',
+                code_1c=code_1c,
             )
         except ValueError as e:
             logger.debug(

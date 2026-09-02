@@ -64,7 +64,7 @@ def _check(label: str, condition: bool, detail: str = '') -> bool:
 
 
 def test_format1(normalizer: ArticleNormalizer) -> bool:
-    """Формат 1: 'Наименование для печати' приоритетнее 'Наименование'."""
+    """Формат 1: 'Наименование для печати' приоритетнее 'Наименования'."""
     print(f'\n{YELLOW}=== test_format1 ==={RESET}')
     parser = FlexiblePriceParser(
         {
@@ -92,6 +92,12 @@ def test_format1(normalizer: ArticleNormalizer) -> bool:
         '«по запросу» → price=0',
         por is not None and float(por.price) == 0.0,
         detail=str(por) if por else 'not found',
+    )
+    # code_1c: колонка «Код» в фикстуре = 00-000001 и т.д. Должна попасть в PriceItem.
+    ok &= _check(
+        '«Код» (ArticlePC) подхвачен в PriceItem.code_1c',
+        all(i.code_1c.startswith('00-') for i in items),
+        detail=', '.join(repr(i.code_1c) for i in items[:3]),
     )
     return ok
 

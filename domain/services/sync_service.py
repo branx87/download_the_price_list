@@ -220,6 +220,25 @@ class SyncService:
                 result.price_changes_list = price_changes
                 logger.info(f"🔄 Обновлено цен: {updated} (из них изменений цен: {len(price_changes)})")
 
+            # ArticlePC: проставляем код 1С для новых и обновлённых позиций,
+            # если парсер его вернул. bulk_set_article_pc перезаписывает
+            # ТОЛЬКО пустые ArticlePC (WHERE ArticlePC IS NULL OR = ''),
+            # так что уже заполненные коды 1С не затираются.
+            items_with_pc = [i for i in to_add + to_update if i.code_1c]
+            if items_with_pc and hasattr(self.repository, 'bulk_set_article_pc'):
+                pc_payload = [
+                    {'vendor': i.vendor, 'part_num': i.article, 'article_pc': i.code_1c}
+                    for i in items_with_pc
+                ]
+                try:
+                    pc_updated = self.repository.bulk_set_article_pc(pc_payload)
+                    logger.info(
+                        "🏷 ArticlePC обновлён для %s/%s позиций",
+                        pc_updated, len(items_with_pc),
+                    )
+                except Exception as e:
+                    logger.warning("⚠️ Не удалось обновить ArticlePC: %s", e)
+
             # Позиции "по запросу": новые добавляем, существующим обновляем PriceText
             if price_on_request_new:
                 self.repository.add_items(price_on_request_new, synonyms_map=synonyms_map)
