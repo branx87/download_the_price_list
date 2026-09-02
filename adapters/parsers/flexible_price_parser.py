@@ -50,11 +50,12 @@ DEFAULT_ALIASES: Dict[str, List[str]] = {
         'описание',
     ],
     'price': [
-        'тариф с ндс',
-        'тариф',
-        'цена с ндс',
-        'цена',
-        'без ндс',
+        'цена с ндс',    # самый приоритетный — «Цена с НДС, руб» побеждает «Тариф»
+        'тариф с ндс',   # для CHINT-стиля
+        'ндс',           # «Цена с НДС», «Стоимость с НДС» — но проигрывает «цена с ндс»
+        'без ндс',       # «Цена без НДС»
+        'тариф',         # «Тариф» — только когда ничего лучше
+        'цена',          # «Цена» — только когда ничего лучше
     ],
     'units': [
         'единица хранения',
@@ -120,23 +121,39 @@ def _find_column(
     keywords: List[str],
     used: Optional[Set[int]] = None,
 ) -> Optional[int]:
-    """Возвращает индекс первой колонки, заголовок которой содержит
+    """Возвращает индекс ЛУЧШЕЙ колонки, заголовок которой содержит
     хотя бы одно ключевое слово (case-insensitive substring).
+
+    «Лучшая» — это колонка, у которой:
+      1. Самый приоритетный keywords (ранний индекс в списке).
+      2. При равном приоритете — самый короткий заголовок (точное
+         совпадение: «Наименование» побеждает «Наименование задачи»,
+         «Цена с НДС, руб» побеждает «Цена»).
 
     Параметр `used` — множество уже занятых индексов; такие колонки
     пропускаются. Это нужно для приоритизации ролей: если «Код» уже
     ушёл в code_1c, то article его не перебьёт.
     """
     skipped = used or set()
+    best_idx: Optional[int] = None
+    best_prio: int = len(keywords) + 1
+    best_len: int = 10**9
+
     for idx, header in enumerate(headers):
         if idx in skipped:
             continue
         h = _normalize_header(header)
         if not h:
             continue
-        if any(kw in h for kw in keywords):
-            return idx
-    return None
+        for prio, kw in enumerate(keywords):
+            if kw in h:
+                # При равном приоритете побеждает более короткий заголовок.
+                if prio < best_prio or (prio == best_prio and len(h) < best_len):
+                    best_idx = idx
+                    best_prio = prio
+                    best_len = len(h)
+                break  # первый совпавший keyword — самый приоритетный для колонки
+    return best_idx
 
 
 def _is_price_on_request(raw: Any) -> bool:

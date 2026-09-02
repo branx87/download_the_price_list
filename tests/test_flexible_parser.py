@@ -189,7 +189,6 @@ def test_missing_required(normalizer: ArticleNormalizer) -> bool:
     items = parser.parse(FIXTURES_DIR / 'sample_mixed.xlsx', vendor='GENERIC')
 
     stats = getattr(parser, '_last_stats', {})
-    # sample_mixed содержит 3 листа: 2 валидных + 1 «Служебный» без обязательных
     ok = True
     ok &= _check(
         'with_headers == 2 (служебный отброшен)',
@@ -197,6 +196,58 @@ def test_missing_required(normalizer: ArticleNormalizer) -> bool:
         detail=str(stats),
     )
     ok &= _check('Не упали, items не пустые', len(items) > 0)
+    return ok
+
+
+def test_real_price_mp(normalizer: ArticleNormalizer) -> bool:
+    """Реальный файл «Прайс МП.xlsx» из price_files/ — регрессионный кейс.
+
+    До правки _find_column парсер возвращал 0 items: «Наименование задачи»
+    перебивало «Наименование» (description=None в данных), и строки
+    отбрасывались. После правки description подхватывает «Наименование»
+    (idx 15), price — «Цена с НДС, руб» (idx 21).
+    """
+    real_file = PROJECT_ROOT / 'price_files' / 'Прайс МП.xlsx'
+    if not real_file.exists():
+        print(f'\n{YELLOW}=== test_real_price_mp ==={RESET}')
+        print(f'  {YELLOW}[SKIP]{RESET} {real_file.name} не найден')
+        return True
+
+    print(f'\n{YELLOW}=== test_real_price_mp ==={RESET}')
+    parser = FlexiblePriceParser(
+        {'vendor_from_column': True, 'default_vendor': 'GENERIC'},
+        normalizer,
+    )
+    items = parser.parse(real_file, vendor='GENERIC')
+
+    print(f'Распарсено: {len(items)} позиций')
+    _print_items(items, limit=3)
+
+    stats = getattr(parser, '_last_stats', {})
+    ok = True
+    ok &= _check(
+        'Лист «Расчет» опознан как с заголовками',
+        stats.get('with_headers', 0) >= 1,
+        detail=str(stats),
+    )
+    ok &= _check(
+        'Позиций > 0 (раньше было 0)',
+        len(items) > 0,
+        detail=f'len={len(items)}',
+    )
+    ok &= _check(
+        'Вендор подхвачен из «Производитель»',
+        all(i.vendor not in ('', 'GENERIC') for i in items),
+        detail=', '.join({i.vendor for i in items}),
+    )
+    ok &= _check(
+        'Артикулы непустые',
+        all(i.article for i in items),
+    )
+    ok &= _check(
+        'Цена > 0 хотя бы у одной позиции',
+        any(float(i.price) > 0 for i in items),
+    )
     return ok
 
 
@@ -250,6 +301,54 @@ def test_column_priority(normalizer: ArticleNormalizer) -> bool:
         detail=f'article={col_map2.get("article")}',
     )
 
+    # Случай 3: реальный кейс «Прайс МП.xlsx» — длинные составные заголовки.
+    # «Наименование задачи» и «Наименование» рядом → description должна быть
+    # «Наименование» (idx 15), а не «Наименование задачи» (idx 2).
+    # «Тариф» и «Цена с НДС, руб» рядом → price должна быть
+    # «Цена с НДС, руб» (idx 21), а не «Тариф» (idx 18).
+    headers3 = [
+        '№ п.п.', 'Номер процесса', 'Наименование задачи',
+        'Диспетчерское наименование', 'Тип НКУ', 'Степень секционирования',
+        'Кол-во вводов', 'Номинальный ток вводного аппарата',
+        'Кол-во отходящих фидеров', 'Высота', 'Ширина', 'Глубина', 'IP',
+        'Производитель',  # 13
+        'Артикул',        # 14
+        'Наименование',   # 15
+        'Кол-во',         # 16
+        'Ед. изм',        # 17
+        'Тариф',          # 18
+        'Валюта',         # 19
+        'Скидка, %',      # 20
+        'Цена с НДС, руб',  # 21
+        'Стоимость с НДС, руб',  # 22
+        'Срок поставки',
+        'Трудозатраты, чел*час',
+        'Артикул РС',     # 25
+    ]
+    col_map3 = parser.map_columns(headers3)
+    print(f'\n  headers={headers3}')
+    print(f'  col_map={col_map3}')
+    ok &= _check(
+        '«Наименование» (а не «Наименование задачи») → description',
+        col_map3.get('description') == 15,
+        detail=f'description={col_map3.get("description")}',
+    )
+    ok &= _check(
+        '«Цена с НДС, руб» (а не «Тариф») → price',
+        col_map3.get('price') == 21,
+        detail=f'price={col_map3.get("price")}',
+    )
+    ok &= _check(
+        '«Артикул РС» → code_1c',
+        col_map3.get('code_1c') == 25,
+        detail=f'code_1c={col_map3.get("code_1c")}',
+    )
+    ok &= _check(
+        '«Прочие ПР» (любая manufacturer) → manufacturer',
+        col_map3.get('manufacturer') == 13,
+        detail=f'manufacturer={col_map3.get("manufacturer")}',
+    )
+
     return ok
 
 
@@ -263,6 +362,7 @@ def main() -> int:
         test_mixed(normalizer),
         test_vendor_override(normalizer),
         test_missing_required(normalizer),
+        test_real_price_mp(normalizer),
         test_column_priority(normalizer),
     ]
 
