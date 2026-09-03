@@ -1151,9 +1151,11 @@ class SqlRepository(IRepository):
                         "(code TEXT, vendor TEXT, part_num TEXT, updated_at TEXT)"
                     ))
                     session.execute(text("DELETE FROM tmp_mapping_update"))
-                    session.executemany(
-                        "INSERT INTO tmp_mapping_update VALUES (:code, :vendor, :part_num, :updated_at)",
-                        to_update
+                    # SQLAlchemy 2.x: session.executemany удалён, делаем
+                    # executemany под капотом через session.execute(text, list_of_dicts).
+                    session.execute(
+                        text("INSERT INTO tmp_mapping_update VALUES (:code, :vendor, :part_num, :updated_at)"),
+                        to_update,
                     )
                     session.execute(text("""
                         UPDATE Total_Price
@@ -1166,9 +1168,9 @@ class SqlRepository(IRepository):
                         "CREATE TABLE #mapping_update "
                         "(code NVARCHAR(50), vendor NVARCHAR(250), part_num NVARCHAR(250), updated_at DATETIME)"
                     ))
-                    session.executemany(
-                        "INSERT INTO #mapping_update VALUES (:code, :vendor, :part_num, :updated_at)",
-                        to_update
+                    session.execute(
+                        text("INSERT INTO #mapping_update VALUES (:code, :vendor, :part_num, :updated_at)"),
+                        to_update,
                     )
                     session.execute(text("""
                         UPDATE tp
