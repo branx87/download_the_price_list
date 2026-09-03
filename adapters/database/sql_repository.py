@@ -400,7 +400,12 @@ class SqlRepository(IRepository):
                             tp.updated_at = t.updated_at
                         FROM Total_Price tp
                         INNER JOIN #tmp_price_upd t
-                            ON tp.Vendor = t.Vendor AND tp.Part_Num = t.Part_Num
+                            ON tp.Vendor = t.Vendor
+                            -- Сравниваем нормализованные Part_Num: UPPER + без пробелов/табов.
+                            -- В БД могут лежать записи с пробелами (до введения normalize_article),
+                            -- а в tmp_price_upd — нормализованные значения. Простое '=' даст 0 матчей.
+                            AND UPPER(REPLACE(REPLACE(tp.Part_Num, ' ', ''), CHAR(9), ''))
+                              = t.Part_Num
                         WHERE (tp.Status IS NULL OR tp.Status != 'discontinued')
                     """))
                     affected = result.rowcount
@@ -1010,7 +1015,10 @@ class SqlRepository(IRepository):
                             tp.updated_at = t.updated_at
                         FROM Total_Price tp
                         INNER JOIN #tmp_apc t
-                            ON tp.Vendor = t.Vendor AND tp.Part_Num = t.Part_Num
+                            ON tp.Vendor = t.Vendor
+                            -- Нормализованное сравнение Part_Num (см. update_items).
+                            AND UPPER(REPLACE(REPLACE(tp.Part_Num, ' ', ''), CHAR(9), ''))
+                              = t.Part_Num
                         WHERE tp.ArticlePC IS NULL OR tp.ArticlePC = ''
                     """))
                     affected = result.rowcount
