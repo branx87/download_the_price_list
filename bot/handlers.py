@@ -1553,11 +1553,15 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         result = await asyncio.get_event_loop().run_in_executor(
             None, lambda: service.sync_vendor(vendor, mark_disappeared=False)
         )
-        logger.info("[FIX] upload_price_handler: sync done vendor=%s total=%s new=%s updated=%s",
-                    vendor, result.total_items, result.new_items, result.updated_items)
+        # sync_vendor мог подменить vendor на реальный (из колонки «Производитель»),
+        # если файл generic и в нём один вендор. Берём из result.vendor, чтобы
+        # в Telegram-отчёте было видно правильное имя.
+        actual_vendor = getattr(result, 'vendor', vendor) or vendor
+        logger.info("[FIX] upload_price_handler: sync done vendor=%s (file=%s) total=%s new=%s updated=%s",
+                    actual_vendor, vendor, result.total_items, result.new_items, result.updated_items)
 
         report_lines = [
-            f"✅ <b>{vendor}</b> — синхронизация завершена!",
+            f"✅ <b>{actual_vendor}</b> — синхронизация завершена!",
             f"",
             f"📦 Всего позиций: {result.total_items}",
             f"➕ Новых: {result.new_items}",

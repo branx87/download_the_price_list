@@ -74,6 +74,36 @@ class SyncService:
             result.total_items = len(new_items)
             logger.info(f"📊 Распарсено {len(new_items)} позиций")
 
+            # 2.1 Определяем реальный vendor по распарсенным items.
+            # Для generic-парсера (vendor_from_column=True) каждая строка может
+            # иметь свой вендор из колонки «Производитель». Если все items
+            # одинаковые — используем его для запросов к БД (иначе sync ищет
+            # по 'GENERIC' из filename и ничего не находит → всё «новое»).
+            actual_vendor = vendor
+            if new_items:
+                vendors_in_file = [i.vendor for i in new_items if i.vendor]
+                if vendors_in_file:
+                    unique = set(vendors_in_file)
+                    if len(unique) == 1:
+                        actual_vendor = next(iter(unique))
+                    else:
+                        # Mixed vendors в файле — берём самый частый, остальных
+                        # обработаем отдельно если потребуется.
+                        from collections import Counter
+                        actual_vendor = Counter(vendors_in_file).most_common(1)[0][0]
+                        logger.warning(
+                            "⚠️ В файле %d разных vendor'ов (%s), "
+                            "использую самый частый: %s",
+                            len(unique), ', '.join(sorted(unique)), actual_vendor,
+                        )
+            if actual_vendor != vendor:
+                logger.info(
+                    "🔄 Vendor из filename (%s) заменён на реальный (%s) по данным файла",
+                    vendor, actual_vendor,
+                )
+                vendor = actual_vendor
+                result.vendor = actual_vendor
+
             # 3. Получаем текущие данные из БД (активные + disappeared)
             current_items = self.repository.get_items_by_vendor(vendor)
 
