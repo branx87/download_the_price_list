@@ -4,6 +4,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from datetime import datetime
+from decimal import Decimal
 import subprocess
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ from domain.services.report_service import ReportService
 from adapters.erp.erp_client import ErpClient
 from domain.services.erp_sync_service import ErpSyncService
 from adapters.downloaders.upload_downloader import UploadDownloader
+from domain.entities.price_item import PriceItem
 
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - Справка
 
 📎 Файлы:
-- Маппинг кодов 1С (имя: *маппинг* или *mapping*)"""
+- Маппинг кодов 1С (.xls/.xlsx, имя любое — определяется по колонкам)"""
 
     await update.message.reply_text(text)
 
@@ -410,8 +412,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - Справка
 
 📎 Загрузка файлов (отправь файл боту):
-- Маппинг кодов 1С: файл .xls с колонками Артикул, Производитель, Код
-  (имя файла должно содержать «маппинг» или «mapping»)
+- Маппинг кодов 1С: .xls/.xlsx с колонками Артикул, Производитель, Код
+  (имя файла любое — тип определяется по заголовкам)
 - ШИНА: файл .xls с конфигурацией шин
 - Снятые с производства: файл .xlsx/.csv
 
@@ -618,6 +620,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == 'labor_noop':
+        return
+
+    if query.data.startswith('mapping_add_yes_') or query.data.startswith('mapping_add_no_'):
+        decision = 'yes' if query.data.startswith('mapping_add_yes_') else 'no'
+        try:
+            await _handle_mapping_add_callback(query, context, decision)
+        except Exception as e:
+            logger.error("[MAPPING] add callback error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
+            except Exception:
+                pass
         return
 
     if query.data.startswith('labor_page_'):
@@ -1342,8 +1356,38 @@ async def shina_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Маппинг артикул+производитель → код 1С ────────────────────────────────────
 
-async def _handle_mapping_upload(update: Update, file_path):
-    """Загружает маппинг артикул+производитель -> код 1С из Excel (.xls)."""
+# Префикс ключа в context.user_data для кэша ненайденных позиций.
+# Полный ключ: f'{_MAPPING_PENDING_KEY_PREFIX}{message_id}'
+_MAPPING_PENDING_KEY_PREFIX = 'mapping_pending_'
+
+
+def _looks_like_mapping_file(file_path: Path) -> bool:
+    """True, если файл является маппингом 1С по ЗАГОЛОВКАМ колонок.
+
+    Используется для определения типа файла без зависимости от имени.
+    Маппинг = есть Артикул + Код/Артикул РС + Производитель.
+    """
+    try:
+        from adapters.parsers.mapping_parser import MappingParser
+        return MappingParser().detect(file_path)
+    except Exception as e:
+        logger.warning("[MAPPING] _looks_like_mapping_file: %s", e)
+        return False
+
+
+def _build_mapping_pending_key(message_id: int) -> str:
+    return f'{_MAPPING_PENDING_KEY_PREFIX}{message_id}'
+
+
+async def _handle_mapping_upload(update: Update, file_path: Path, context: ContextTypes.DEFAULT_TYPE):
+    """Загружает маппинг артикул+производитель -> код 1С из Excel (.xls/.xlsx).
+
+    Логика:
+      1. Парсим файл (по заголовкам, без привязки к имени).
+      2. Делаем bulk UPDATE ArticlePC для найденных пар (manufacturer, article).
+      3. Если есть ненайденные — кладём их в context.user_data и
+         показываем инлайн-кнопки «Да, добавить N шт.» / «Нет».
+    """
     from adapters.parsers.mapping_parser import MappingParser
 
     msg = await update.message.reply_text("🔄 Загружаю маппинг артикулов...")
@@ -1365,6 +1409,7 @@ async def _handle_mapping_upload(update: Update, file_path):
             f"📥 Записей в файле: {len(items)}",
             f"🔗 Обновлено ArticlePC: {updated}",
         ]
+        reply_markup = None
         if not_found:
             lines.append(f"⚠️ Не найдено в БД: {len(not_found)}")
             for nf in not_found[:10]:
@@ -1372,12 +1417,101 @@ async def _handle_mapping_upload(update: Update, file_path):
             if len(not_found) > 10:
                 lines.append(f"  ... и ещё {len(not_found) - 10}")
 
-        await msg.edit_text("\n".join(lines), parse_mode='HTML')
+            # Кладём ненайденные в user_data, чтобы кнопки могли их достать.
+            token = msg.message_id
+            context.user_data[_build_mapping_pending_key(token)] = not_found
+
+            lines.append("\n❓ <b>Добавить эти позиции в БД?</b>")
+            lines.append("Цена будет выставлена «Цена по запросу» (Price=0).")
+            reply_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        f"✅ Да, добавить {len(not_found)} шт.",
+                        callback_data=f"mapping_add_yes_{token}",
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Нет",
+                        callback_data=f"mapping_add_no_{token}",
+                    ),
+                ],
+            ])
+
+        await msg.edit_text("\n".join(lines), parse_mode='HTML', reply_markup=reply_markup)
         logger.info("[MAPPING] upload: total=%d updated=%d not_found=%d",
                     len(items), updated, len(not_found))
     except Exception as e:
         logger.error("[MAPPING] _handle_mapping_upload: %s", e, exc_info=True)
         await msg.edit_text(f"❌ Ошибка загрузки маппинга:\n{str(e)[:300]}")
+
+
+async def _handle_mapping_add_callback(query, context: ContextTypes.DEFAULT_TYPE, decision: str):
+    """Обрабатывает нажатие «Да/Нет» на запрос добавления ненайденных позиций.
+
+    decision: 'yes' | 'no'
+    """
+    callback_data = query.data or ''
+    parts = callback_data.rsplit('_', 1)
+    if len(parts) != 2:
+        await query.edit_message_text("⚠️ Устаревшая кнопка. Загрузите файл заново.")
+        return
+    try:
+        token = int(parts[1])
+    except ValueError:
+        await query.edit_message_text("⚠️ Устаревшая кнопка. Загрузите файл заново.")
+        return
+
+    key = _build_mapping_pending_key(token)
+    not_found = context.user_data.pop(key, None)
+
+    if not not_found:
+        await query.edit_message_text(
+            "⚠️ Список ненайденных позиций устарел или уже обработан.\n"
+            "Загрузите файл маппинга заново."
+        )
+        return
+
+    if decision == 'no':
+        await query.edit_message_text(
+            f"🚫 Ок, не добавляю. Пропущено позиций: <b>{len(not_found)}</b>.",
+            parse_mode='HTML',
+        )
+        logger.info("[MAPPING] user declined add: skipped=%d", len(not_found))
+        return
+
+    # decision == 'yes': добавляем все позиции одним батчем.
+    def _do_add():
+        repository = SqlRepository(settings.DATABASE_URL)
+        price_items = [
+            PriceItem(
+                vendor=item['manufacturer'],
+                article=item['article'],
+                description=item.get('description', ''),
+                price=Decimal(0),  # → PriceText='Цена по запросу' в add_items
+                units=item.get('units') or 'шт',
+                storage='',
+                code_1c=item['code'],
+            )
+            for item in not_found
+        ]
+        added = repository.add_items(price_items)
+        return added, len(price_items)
+
+    added, total = await asyncio.get_event_loop().run_in_executor(None, _do_add)
+
+    lines = [
+        "✅ <b>Добавление завершено!</b>\n",
+        f"➕ Добавлено в БД: <b>{added}</b> из {total}",
+        f"💬 Цена: <i>«Цена по запросу»</i> (Price=0, PriceText заполнен автоматически)",
+        "",
+        "Первые позиции:",
+    ]
+    for nf in not_found[:5]:
+        lines.append(f"  • {nf['manufacturer']} | {nf['article']} → {nf['code']}")
+    if total > 5:
+        lines.append(f"  ... и ещё {total - 5}")
+
+    await query.edit_message_text("\n".join(lines), parse_mode='HTML')
+    logger.info("[MAPPING] user accepted add: total=%d added=%d", total, added)
 
 
 # ─── Загрузка прайса через файл ───────────────────────────────────────────────
@@ -1470,8 +1604,10 @@ async def _handle_sahat_upload(update: Update, file_path):
 async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик входящего документа — загружает прайс вендора из файла.
 
-    Администратор отправляет Excel-файл боту. Бот определяет вендора по имени
-    файла, парсит прайс и синхронизирует данные с БД.
+    Администратор отправляет Excel-файл боту. Бот определяет тип файла:
+      1. discontinued — по имени файла (legacy).
+      2. mapping 1C — по ЗАГОЛОВКАМ колонок (Артикул + Код + Производитель).
+      3. price-list вендора — по имени файла (ключевые слова) с фолбэком GENERIC.
     """
     doc = update.message.document
     if doc is None:
@@ -1488,7 +1624,7 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # Файл со списком снятых с производства
+    # 1) Снятые с производства — по имени файла (legacy).
     is_discontinued = any(kw in filename.lower() for kw in ('снят', 'disc'))
     if is_discontinued:
         settings.PRICE_FILES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1498,31 +1634,24 @@ async def upload_price_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await _handle_discontinued_upload(update, dest_path)
         return
 
-    # Файл маппинга артикулов (код 1С)
-    is_mapping = any(kw in filename.lower() for kw in ('маппинг', 'mapping', 'код1с', 'код_1с'))
-    if is_mapping:
-        settings.PRICE_FILES_DIR.mkdir(parents=True, exist_ok=True)
-        dest_path = settings.PRICE_FILES_DIR / filename
-        tg_file = await context.bot.get_file(doc.file_id)
-        await tg_file.download_to_drive(str(dest_path))
-        await _handle_mapping_upload(update, dest_path)
+    # Скачиваем файл один раз — дальше используем и для маппинга, и для вендора.
+    settings.PRICE_FILES_DIR.mkdir(parents=True, exist_ok=True)
+    dest_path = settings.PRICE_FILES_DIR / filename
+    tg_file = await context.bot.get_file(doc.file_id)
+    await tg_file.download_to_drive(str(dest_path))
+    logger.info("[FIX] upload_price_handler: файл сохранён path=%s", dest_path)
+
+    # 2) Маппинг 1С — по ЗАГОЛОВКАМ колонок (имя файла не важно).
+    if _looks_like_mapping_file(dest_path):
+        await _handle_mapping_upload(update, dest_path, context)
         return
 
-    # Определяем вендора по имени файла (с фолбэком на GENERIC).
-    # Если ни одно ключевое слово не нашлось — попробуем generic-парсер.
+    # 3) Определяем вендора по имени файла (с фолбэком на GENERIC).
     vendor = detect_vendor_from_filename(filename)
 
     await update.message.reply_text(f"📥 Получен файл <b>{filename}</b>\nВендор: <b>{vendor}</b>\nНачинаю синхронизацию...", parse_mode='HTML')
 
     try:
-        # Скачиваем файл во временную директорию
-        settings.PRICE_FILES_DIR.mkdir(parents=True, exist_ok=True)
-        dest_path = settings.PRICE_FILES_DIR / filename
-
-        tg_file = await context.bot.get_file(doc.file_id)
-        await tg_file.download_to_drive(str(dest_path))
-        logger.info("[FIX] upload_price_handler: файл сохранён path=%s", dest_path)
-
         # Специальный путь для ШИНА
         if vendor == 'ШИНА':
             await _handle_shina_upload(update, dest_path)
