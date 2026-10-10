@@ -1547,6 +1547,10 @@ _NSI_RESULTS_KEY_PREFIX = 'nsi_results_'
 _NSI_TOP_K = 5
 # Минимальный similarity, ниже которого результат скрывается.
 _NSI_MIN_SIMILARITY = 50.0
+# Порог «слабого» SQL-совпадения. Если MAX(similarity) в SQL ниже этого —
+# параллельно показываем и NSI, даже если SQL что-то нашёл.
+# (Защита от случая «SQL нашёл мусор, NSI нашёл точно».)
+_SQL_WEAK_THRESHOLD = 75.0
 
 
 def _build_nsi_results_key(message_id: int) -> str:
@@ -1710,7 +1714,15 @@ async def _nsi_search(query: str) -> list[dict]:
 def _format_nsi_results(results: list[dict], query: str) -> tuple[str, InlineKeyboardMarkup | None]:
     """Формирует текст сообщения и инлайн-клавиатуру для результатов поиска.
 
-    Результаты могут быть из SQL (source='sql') или NSI (source='nsi').
+    Поддерживает смешанные результаты: SQL + NSI в одном сообщении.
+    Рендерит секции по источникам (🗄 Total_Price / 🔮 NSI).
+
+    Различаем:
+      - source='sql' — позиция уже в Total_Price. Кнопка «Добавить» НЕ нужна.
+        Показываем инфо + цену.
+      - source='nsi' — позиция из 1С-номенклатуры, но в нашей SQL её нет.
+        Кнопка «Добавить» нужна.
+
     Возвращает (text, keyboard). Keyboard=None, если нет результатов.
     """
     if not results:
@@ -1723,15 +1735,21 @@ def _format_nsi_results(results: list[dict], query: str) -> tuple[str, InlineKey
             None,
         )
 
-    # Определяем источник: если есть хоть один результат, берём его источник
-    source = results[0].get('source', 'nsi')
-    source_badge = '🗄 <b>Total_Price</b>' if source == 'sql' else '🔮 <b>NSI</b> (engineering-assistant)'
-
-    lines = [f"🔍 <b>Поиск:</b> <i>{query}</i> · источник: {source_badge}\n"]
-    lines.append(f"Найдено: <b>{len(results)}</b>. Нажмите «Добавить», чтобы внести в прайс.\n")
-
-    buttons: list[list[InlineKeyboardButton]] = []
+    # Группируем по источнику, сохраняя порядок элементов (для индексов кнопок)
+    sql_items: list[tuple[int, dict]] = []
+    nsi_items: list[tuple[int, dict]] = []
     for idx, r in enumerate(results):
+        src = r.get('source', 'nsi')
+        if src == 'sql':
+            sql_items.append((idx, r))
+        else:
+            nsi_items.append((idx, r))
+
+    total = len(results)
+    lines = [f"🔍 <b>Поиск:</b> <i>{query}</i> · найдено: <b>{total}</b>\n"]
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    def _render_item(r: dict) -> str:
         sim = r.get('similarity_percent', 0)
         sim_emoji = '🟢' if sim >= 90 else '🟡' if sim >= 75 else '🟠'
         vendor = (r.get('vendor') or '—').strip()
@@ -1739,26 +1757,56 @@ def _format_nsi_results(results: list[dict], query: str) -> tuple[str, InlineKey
         name = (r.get('name') or '').strip()
         code = (r.get('code') or '').strip() or '—'
         unit = (r.get('unit') or '').strip()
-        # Telegram: < 4096 chars на сообщение, нам хватает с запасом.
         if len(name) > 80:
             name = name[:77] + '…'
         unit_str = f" · <i>{unit}</i>" if unit else ''
-        code_line = f"    Код 1С: <code>{code}</code> · " if code and code != '—' else "    Код 1С: <i>—</i> · "
-        lines.append(
+        if code and code != '—':
+            code_line = f"    Код 1С: <code>{code}</code> · "
+        else:
+            code_line = "    Код 1С: <i>—</i> · "
+        extra = ''
+        if r.get('source') == 'sql':
+            price = r.get('price')
+            if price is not None:
+                try:
+                    price_f = float(price)
+                    if price_f > 0:
+                        extra = f"\n    💰 <b>{price_f:,.2f} ₽</b>"
+                    else:
+                        extra = f"\n    💰 <i>«Цена по запросу»</i>"
+                except (ValueError, TypeError):
+                    pass
+        return (
             f"{sim_emoji} <b>{vendor} | {article}</b>\n"
             f"    {name}{unit_str}\n"
-            f"{code_line}совпадение: <b>{sim:.0f}%</b>"
+            f"{code_line}совпадение: <b>{sim:.0f}%</b>{extra}"
         )
-        buttons.append([
-            InlineKeyboardButton(
-                f"➕ #{idx + 1} · {vendor[:14]} | {article[:18]}",
-                callback_data=f'nsi_add_{idx}',
-            ),
-        ])
 
-    # Кнопка «Закрыть» — просто убирает клавиатуру.
+    # Секция SQL
+    if sql_items:
+        lines.append(f"🗄 <b>Total_Price</b> ({len(sql_items)}) — уже в нашей БД:")
+        for _, r in sql_items:
+            lines.append(_render_item(r))
+        lines.append("")
+
+    # Секция NSI
+    if nsi_items:
+        lines.append(f"🔮 <b>NSI</b> (engineering-assistant) ({len(nsi_items)}) — нажмите «Добавить», чтобы внести в прайс:")
+        for idx, r in nsi_items:
+            lines.append(_render_item(r))
+            vendor = (r.get('vendor') or '—').strip()
+            article = (r.get('article') or '—').strip()
+            buttons.append([
+                InlineKeyboardButton(
+                    f"➕ #{idx + 1} · {vendor[:14]} | {article[:18]}",
+                    callback_data=f'nsi_add_{idx}',
+                ),
+            ])
+        lines.append("")
+
+    # Кнопка «Закрыть» — для любого непустого результата
     buttons.append([InlineKeyboardButton("🚫 Закрыть", callback_data="nsi_close")])
-    return "\n\n".join(lines), InlineKeyboardMarkup(buttons)
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(buttons)
 
 
 @admin_only
@@ -1797,17 +1845,31 @@ async def nsi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    msg = await update.message.reply_text(f"🔍 Ищу <i>{q}</i> в Total_Price…", parse_mode='HTML')
+    msg = await update.message.reply_text(f"🔍 Ищу <i>{q}</i> в Total_Price + NSI…", parse_mode='HTML')
 
-    # 1) Сначала ищем в локальной SQL — мгновенно, без HTTP.
-    results = await asyncio.get_event_loop().run_in_executor(None, _sql_search, q)
+    # Параллельно: SQL (через executor) + NSI (HTTP). Оба быстрые.
+    sql_task = asyncio.get_event_loop().run_in_executor(None, _sql_search, q)
+    nsi_task = _nsi_search(q)
+    sql_results, nsi_results = await asyncio.gather(sql_task, nsi_task)
 
-    source_used = 'sql'
-    # 2) Если SQL пуст — fallback на NSI (векторная БД 1С).
-    if not results:
-        await msg.edit_text(f"🔍 В Total_Price пусто, ищу <i>{q}</i> в NSI…", parse_mode='HTML')
-        results = await _nsi_search(q)
-        source_used = 'nsi'
+    # Логика отображения:
+    #   - SQL нашёл ХОРОШИЕ совпадения (max sim >= _SQL_WEAK_THRESHOLD) → только SQL.
+    #   - SQL пуст или слаб → показываем оба источника.
+    sql_max = max((r.get('similarity_percent', 0) for r in sql_results), default=0)
+    sql_strong = bool(sql_results) and sql_max >= _SQL_WEAK_THRESHOLD
+
+    if sql_strong and not nsi_results:
+        results = sql_results
+        sql_shown, nsi_shown = len(sql_results), 0
+    elif sql_strong and nsi_results:
+        # Оба есть, но SQL сильный — всё равно покажем оба, чтобы пользователь
+        # видел и «наше», и «из 1С». Это редкий случай (запрос совпадает в обеих БД).
+        results = sql_results + nsi_results
+        sql_shown, nsi_shown = len(sql_results), len(nsi_results)
+    else:
+        # SQL пуст или слаб — показываем всё, что нашли.
+        results = sql_results + nsi_results
+        sql_shown, nsi_shown = len(sql_results), len(nsi_results)
 
     text, keyboard = _format_nsi_results(results, q)
     reply_markup = keyboard
@@ -1818,9 +1880,9 @@ async def nsi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await msg.edit_text(text, parse_mode='HTML', reply_markup=reply_markup)
     logger.info(
-        "[NSI] query=%r source=%s results=%d similarity_min=%.1f",
-        q, source_used, len(results),
-        min((r.get('similarity_percent', 0) for r in results), default=0),
+        "[NSI] query=%r sql=%d (max_sim=%.1f) nsi=%d shown=%d (sql=%d, nsi=%d) strong=%s",
+        q, len(sql_results), sql_max, len(nsi_results),
+        len(results), sql_shown, nsi_shown, sql_strong,
     )
 
 
@@ -1844,6 +1906,16 @@ async def _nsi_add_callback(query, context: ContextTypes.DEFAULT_TYPE, result_id
 
     if not vendor or not article:
         await query.answer("⚠️ Нет vendor/article в результате.", show_alert=True)
+        return
+
+    # Защита: кнопка «Добавить» показывается только для NSI-результатов.
+    # Если callback каким-то образом сработал на SQL-результате (например,
+    # устаревшее сообщение с кнопкой) — не дублируем, а сообщаем.
+    if source == 'sql':
+        await query.answer(
+            "ℹ️ Эта позиция уже в Total_Price — добавлять нечего.",
+            show_alert=True,
+        )
         return
 
     def _do_add():
