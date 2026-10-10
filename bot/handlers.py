@@ -8,6 +8,7 @@ from decimal import Decimal
 import subprocess
 from pathlib import Path
 import re
+import httpx
 from config.settings import settings
 from utils.normalizer import ArticleNormalizer
 from vendors.registry import VendorRegistry
@@ -103,6 +104,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /labor_edit - Изменить значение трудозатрат
 /shina - Управление ценами шин (ШИНА)
 /discontinued - Снятые с производства
+/nsi <запрос> - Поиск номенклатуры (SQL → fallback на NSI/векторку)
 /db_copy - Скопировать БД из MSSQL
 /status - Статус
 /debug - Показать ошибки
@@ -406,6 +408,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /labor_edit <Category> <Value> - Изменить трудозатраты
 /shina - Цены шин: /shina медь 1400  или  /shina алюм 500
 /discontinued - Снятые с производства
+/nsi <запрос> - Поиск номенклатуры (SQL → fallback на NSI/векторку)
+  Примеры: /nsi TJ-15  ·  /nsi автомат 16А  ·  /nsi ABB S203-C16
 /db_copy - Скопировать БД из MSSQL
 /status - Статус синхронизаций
 /debug - Показать ошибки
@@ -632,6 +636,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
             except Exception:
                 pass
+        return
+
+    if query.data.startswith('nsi_add_'):
+        try:
+            idx = int(query.data.replace('nsi_add_', ''))
+            await _nsi_add_callback(query, context, idx)
+        except (ValueError, Exception) as e:
+            logger.error("[NSI] add callback error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
+            except Exception:
+                pass
+        return
+
+    if query.data == 'nsi_close':
+        try:
+            # Убираем клавиатуру, текст не трогаем.
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e:
+            logger.debug("[NSI] close: %s", e)
         return
 
     if query.data.startswith('labor_page_'):
@@ -1512,6 +1536,361 @@ async def _handle_mapping_add_callback(query, context: ContextTypes.DEFAULT_TYPE
 
     await query.edit_message_text("\n".join(lines), parse_mode='HTML')
     logger.info("[MAPPING] user accepted add: total=%d added=%d", total, added)
+
+
+# ─── NSI: поиск по векторной БД номенклатуры 1С (engineering-assistant) ───────
+
+# Префикс ключа в context.user_data для кэша результатов NSI-поиска.
+# Полный ключ: f'{_NSI_RESULTS_KEY_PREFIX}{message_id}'
+_NSI_RESULTS_KEY_PREFIX = 'nsi_results_'
+# Сколько результатов показываем и сохраняем в кэш (для кнопок).
+_NSI_TOP_K = 5
+# Минимальный similarity, ниже которого результат скрывается.
+_NSI_MIN_SIMILARITY = 50.0
+
+
+def _build_nsi_results_key(message_id: int) -> str:
+    return f'{_NSI_RESULTS_KEY_PREFIX}{message_id}'
+
+
+def _split_nsi_query(query: str) -> dict:
+    """Эвристика: куда отдать запрос — в `article` или в `name`.
+
+    - Если в строке есть цифры и длина <= 30 — считаем артикулом (иначе имя).
+    - Если несколько токенов через пробел и есть цифры — артикул.
+    - Длинный текст без цифр — имя.
+    FastAPI делает гибридный поиск, поэтому передача в `name` тоже
+    сработает через word/vector match.
+    """
+    q = query.strip()
+    if not q:
+        return {'name': q}
+    has_digit = bool(re.search(r'\d', q))
+    short = len(q) <= 30
+    if has_digit and short and ' ' not in q:
+        return {'article': q}
+    return {'name': q}
+
+
+def _sql_search(query: str) -> list[dict]:
+    """Поиск в Total_Price по article/code/description/vendor.
+
+    Возвращает нормализованный список в формате NSI-результатов,
+    чтобы downstream-код (форматирование, callback) был общий.
+
+    Стратегия: exact > prefix > contains, top 5, отсортированы
+    по убыванию similarity.
+
+    Совместимо с SQLite (дев) и MSSQL (прод) — разная форма запроса
+    через `is_sqlite`, как в остальном SqlRepository.
+    """
+    q = query.strip()
+    if not q:
+        return []
+
+    from sqlalchemy import text
+    like_pct = f'%{q}%'
+    like_prefix = f'{q}%'
+
+    def _do_query():
+        repository = SqlRepository(settings.DATABASE_URL)
+        nolock = repository._nolock
+        if repository.is_sqlite:
+            # SQLite: LIMIT вместо TOP, без NOLOCK
+            sql = text(f"""
+                SELECT Vendor, Part_Num, Descr, Price, Units, ArticlePC
+                FROM Total_Price
+                WHERE
+                    Part_Num = :exact
+                    OR ArticlePC = :exact
+                    OR Part_Num LIKE :prefix ESCAPE '\\'
+                    OR Vendor LIKE :pct ESCAPE '\\'
+                    OR Descr LIKE :pct ESCAPE '\\'
+                LIMIT 10
+            """)
+        else:
+            sql = text(f"""
+                SELECT TOP 10
+                    Vendor, Part_Num, Descr, Price, Units, ArticlePC
+                FROM Total_Price {nolock}
+                WHERE
+                    Part_Num = :exact
+                    OR ArticlePC = :exact
+                    OR Part_Num LIKE :prefix ESCAPE '\\'
+                    OR Vendor LIKE :pct ESCAPE '\\'
+                    OR Descr LIKE :pct ESCAPE '\\'
+            """)
+        with repository.SessionLocal() as session:
+            return session.execute(sql, {
+                'exact': q,
+                'prefix': like_prefix,
+                'pct': like_pct,
+            }).fetchall()
+
+    try:
+        # Эта функция sync; вызывающий код обязан обернуть в run_in_executor
+        rows = _do_query()
+    except Exception as e:
+        logger.error("[NSI/SQL] search error: %s", e, exc_info=True)
+        return []
+
+    q_lower = q.lower()
+    results: list[dict] = []
+    for row in rows:
+        vendor = (row[0] or '').strip()
+        article = (row[1] or '').strip()
+        name = (row[2] or '').strip()
+        price = row[3]
+        unit = (row[4] or '').strip() or 'шт'
+        code = (row[5] or '').strip()
+
+        # Ранжирование
+        art_l = article.lower()
+        code_l = code.lower()
+        vendor_l = vendor.lower()
+        if art_l == q_lower or code_l == q_lower:
+            sim, match_type = 100.0, 'exact'
+        elif art_l.startswith(q_lower):
+            sim, match_type = 85.0, 'prefix'
+        elif q_lower in vendor_l:
+            sim, match_type = 70.0, 'vendor'
+        else:
+            sim, match_type = 50.0, 'contains'
+
+        results.append({
+            'source': 'sql',
+            'vendor': vendor,
+            'article': article,
+            'name': name,
+            'unit': unit,
+            'code': code,
+            'price': price,
+            'similarity_percent': sim,
+            'match_type': match_type,
+        })
+
+    results.sort(key=lambda r: (-r['similarity_percent'], r['article']))
+    return results[:_NSI_TOP_K]
+
+
+async def _nsi_search(query: str) -> list[dict]:
+    """Прямой вызов FastAPI engineering-assistant: GET /search.
+
+    Возвращает список сырых результатов из JSON-ответа (results[].results[]).
+    Пустой список при ошибке.
+    """
+    base = settings.NSI_API_URL.rstrip('/')
+    params = {**_split_nsi_query(query), 'top_k': _NSI_TOP_K}
+    url = f'{base}/search'
+    logger.info("[NSI] GET %s params=%s", url, params)
+    try:
+        async with httpx.AsyncClient(timeout=settings.NSI_REQUEST_TIMEOUT) as client:
+            r = await client.get(url, params=params)
+            r.raise_for_status()
+            data = r.json()
+    except httpx.TimeoutException:
+        logger.error("[NSI] timeout: query=%r", query)
+        return []
+    except httpx.HTTPError as e:
+        logger.error("[NSI] http error: %s", e)
+        return []
+    except Exception as e:
+        logger.error("[NSI] unexpected: %s", e, exc_info=True)
+        return []
+
+    results = (data or {}).get('results') or []
+    # Фильтруем по similarity и проставляем source='nsi'
+    return [
+        {**r, 'source': 'nsi'}
+        for r in results
+        if float(r.get('similarity_percent') or 0) >= _NSI_MIN_SIMILARITY
+    ]
+
+
+def _format_nsi_results(results: list[dict], query: str) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Формирует текст сообщения и инлайн-клавиатуру для результатов поиска.
+
+    Результаты могут быть из SQL (source='sql') или NSI (source='nsi').
+    Возвращает (text, keyboard). Keyboard=None, если нет результатов.
+    """
+    if not results:
+        return (
+            f"🔍 <b>Поиск:</b> <i>{query}</i>\n\n"
+            "Ничего не найдено ни в Total_Price, ни в NSI. Попробуйте:\n"
+            "• другой артикул или часть слова\n"
+            "• вендор (например, <code>ABB</code>)\n"
+            "• наименование (<code>автомат 16А</code>)",
+            None,
+        )
+
+    # Определяем источник: если есть хоть один результат, берём его источник
+    source = results[0].get('source', 'nsi')
+    source_badge = '🗄 <b>Total_Price</b>' if source == 'sql' else '🔮 <b>NSI</b> (engineering-assistant)'
+
+    lines = [f"🔍 <b>Поиск:</b> <i>{query}</i> · источник: {source_badge}\n"]
+    lines.append(f"Найдено: <b>{len(results)}</b>. Нажмите «Добавить», чтобы внести в прайс.\n")
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    for idx, r in enumerate(results):
+        sim = r.get('similarity_percent', 0)
+        sim_emoji = '🟢' if sim >= 90 else '🟡' if sim >= 75 else '🟠'
+        vendor = (r.get('vendor') or '—').strip()
+        article = (r.get('article') or '—').strip()
+        name = (r.get('name') or '').strip()
+        code = (r.get('code') or '').strip() or '—'
+        unit = (r.get('unit') or '').strip()
+        # Telegram: < 4096 chars на сообщение, нам хватает с запасом.
+        if len(name) > 80:
+            name = name[:77] + '…'
+        unit_str = f" · <i>{unit}</i>" if unit else ''
+        code_line = f"    Код 1С: <code>{code}</code> · " if code and code != '—' else "    Код 1С: <i>—</i> · "
+        lines.append(
+            f"{sim_emoji} <b>{vendor} | {article}</b>\n"
+            f"    {name}{unit_str}\n"
+            f"{code_line}совпадение: <b>{sim:.0f}%</b>"
+        )
+        buttons.append([
+            InlineKeyboardButton(
+                f"➕ #{idx + 1} · {vendor[:14]} | {article[:18]}",
+                callback_data=f'nsi_add_{idx}',
+            ),
+        ])
+
+    # Кнопка «Закрыть» — просто убирает клавиатуру.
+    buttons.append([InlineKeyboardButton("🚫 Закрыть", callback_data="nsi_close")])
+    return "\n\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+@admin_only
+async def nsi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /nsi <запрос> — поиск номенклатуры в векторной БД 1С.
+
+    Примеры:
+        /nsi TJ-15           — поиск по артикулу
+        /nsi автомат 16А     — поиск по наименованию (гибрид)
+        /nsi ABB S203-C16    — гибридный поиск
+
+    Под каждым результатом кнопка «Добавить» — INSERT в Total_Price
+    с Price=0 и PriceText='Цена по запросу'.
+    """
+    if not update.message or not update.message.text:
+        return
+    query = update.message.text.split(maxsplit=1)
+    if len(query) < 2 or not query[1].strip():
+        await update.message.reply_text(
+            "🔍 <b>NSI поиск</b>\n\n"
+            "Использование: <code>/nsi &lt;запрос&gt;</code>\n\n"
+            "Примеры:\n"
+            "• <code>/nsi TJ-15</code> — по артикулу\n"
+            "• <code>/nsi автомат 16А</code> — по наименованию (гибрид)\n"
+            "• <code>/nsi ABB S203-C16</code> — гибрид",
+            parse_mode='HTML',
+        )
+        return
+
+    q = query[1].strip()
+    if not settings.NSI_API_URL:
+        await update.message.reply_text(
+            "❌ NSI_API_URL не настроен в .env\n"
+            "Укажите: <code>NSI_API_URL=http://192.168.10.19:8000/api/nsi</code>",
+            parse_mode='HTML',
+        )
+        return
+
+    msg = await update.message.reply_text(f"🔍 Ищу <i>{q}</i> в Total_Price…", parse_mode='HTML')
+
+    # 1) Сначала ищем в локальной SQL — мгновенно, без HTTP.
+    results = await asyncio.get_event_loop().run_in_executor(None, _sql_search, q)
+
+    source_used = 'sql'
+    # 2) Если SQL пуст — fallback на NSI (векторная БД 1С).
+    if not results:
+        await msg.edit_text(f"🔍 В Total_Price пусто, ищу <i>{q}</i> в NSI…", parse_mode='HTML')
+        results = await _nsi_search(q)
+        source_used = 'nsi'
+
+    text, keyboard = _format_nsi_results(results, q)
+    reply_markup = keyboard
+
+    # Кэшируем результаты в user_data, чтобы callback мог их достать.
+    # Ключ = message_id, чтобы разные поиски не пересекались.
+    context.user_data[_build_nsi_results_key(msg.message_id)] = results
+
+    await msg.edit_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    logger.info(
+        "[NSI] query=%r source=%s results=%d similarity_min=%.1f",
+        q, source_used, len(results),
+        min((r.get('similarity_percent', 0) for r in results), default=0),
+    )
+
+
+async def _nsi_add_callback(query, context: ContextTypes.DEFAULT_TYPE, result_idx: int):
+    """Обрабатывает нажатие «➕ Добавить» под результатом NSI-поиска."""
+    message_id = query.message.message_id
+    key = _build_nsi_results_key(message_id)
+    results = context.user_data.get(key) or []
+    if result_idx < 0 or result_idx >= len(results):
+        await query.answer("⚠️ Результат устарел. Выполните поиск заново.", show_alert=True)
+        return
+
+    item = results[result_idx]
+    vendor = (item.get('vendor') or '').strip()
+    article = (item.get('article') or '').strip()
+    code = (item.get('code') or '').strip()
+    name = (item.get('name') or '').strip()
+    unit = (item.get('unit') or '').strip() or 'шт'
+    source = item.get('source', 'nsi')
+    source_badge = '🗄 SQL' if source == 'sql' else '🔮 NSI'
+
+    if not vendor or not article:
+        await query.answer("⚠️ Нет vendor/article в результате.", show_alert=True)
+        return
+
+    def _do_add():
+        repository = SqlRepository(settings.DATABASE_URL)
+        if repository.find_by_vendor_part_num(vendor, article):
+            return 'exists', None
+        price_item = PriceItem(
+            vendor=vendor,
+            article=article,
+            description=name,
+            price=Decimal(0),  # → PriceText='Цена по запросу' в add_items
+            units=unit,
+            storage='',
+            code_1c=code,
+        )
+        added = repository.add_items([price_item])
+        return 'added', added
+
+    status, info = await asyncio.get_event_loop().run_in_executor(None, _do_add)
+
+    sim = item.get('similarity_percent', 0)
+    code_line = f"Код 1С: <code>{code}</code>\n" if code else "Код 1С: <i>—</i>\n"
+    if status == 'exists':
+        text = (
+            f"⚠️ <b>Уже в БД</b> · источник: {source_badge}\n\n"
+            f"<b>{vendor} | {article}</b>\n"
+            f"{code_line}"
+            f"Совпадение: {sim:.0f}%\n\n"
+            f"Позиция уже есть в Total_Price, дубликат не создан."
+        )
+    else:
+        text = (
+            f"✅ <b>Добавлено в прайс</b> · источник: {source_badge}\n\n"
+            f"<b>{vendor} | {article}</b>\n"
+            f"Наименование: {name}\n"
+            f"{code_line}"
+            f"Ед.: {unit}\n"
+            f"Цена: <i>«Цена по запросу»</i> (Price=0)\n"
+            f"Совпадение: {sim:.0f}%"
+        )
+    await query.edit_message_text(text, parse_mode='HTML')
+    # Кэш больше не нужен — кнопка отработала.
+    context.user_data.pop(key, None)
+    logger.info(
+        "[NSI] add: source=%s vendor=%s article=%s status=%s similarity=%.1f",
+        source, vendor, article, status, sim,
+    )
 
 
 # ─── Загрузка прайса через файл ───────────────────────────────────────────────

@@ -47,6 +47,12 @@ class Settings:
     ONE_C_PASSWORD = os.getenv('ONE_C_PASSWORD', '')
     ERP_BASE_URL = os.getenv('ERP_BASE_URL', '')
 
+    # NSI (engineering-assistant) — векторная БД номенклатуры 1С
+    # Поиск: GET {NSI_API_URL}/search?article=...&name=...&top_k=10
+    # Источник: engineering-assistant/backend/app/routers/nsi.py:345
+    NSI_API_URL = os.getenv('NSI_API_URL', 'http://192.168.10.19:8000/api/nsi')
+    NSI_REQUEST_TIMEOUT = int(os.getenv('NSI_REQUEST_TIMEOUT', '30') or '30')
+
     # Типы номенклатуры из 1C, которые НЕ нужно заносить в БД.
     # Пример: ERP_SKIP_ITEM_TYPES=Товары на складах (41),Прочие материалы (10.06)
     @property
