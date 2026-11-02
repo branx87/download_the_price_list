@@ -116,6 +116,31 @@ async def main() -> None:
     try:
         proxy_url = os.getenv('PROXY_URL', '') or None
 
+        # Ограничение зависания на уровне TCP.
+        # httpx read_timeout НЕ применяется к SOCKS5-handshake
+        # (httpcore/_async/socks_proxy.py: _init_socks5_connection) — при
+        # недоступном прокси соединение висит до TCP-таймаута ОС (~15-17 мин
+        # на Linux из-за tcp_retries2) и блокирует event loop, т.е. весь бот.
+        # TCP_USER_TIMEOUT ограничивает это ~30с на уровне сокета.
+        socket_options = None
+        try:
+            import socket as _socket
+            if hasattr(_socket, 'TCP_USER_TIMEOUT'):
+                socket_options = [(_socket.IPPROTO_TCP, _socket.TCP_USER_TIMEOUT, 30_000)]
+        except (ImportError, OSError, AttributeError):
+            socket_options = None
+
+        # socket_options поддерживается не во всех версиях PTB — добавляем только если есть.
+        _httpx_kwargs: dict = {}
+        try:
+            import inspect
+            if 'socket_options' in inspect.signature(HTTPXRequest.__init__).parameters:
+                _httpx_kwargs['socket_options'] = socket_options
+                if socket_options:
+                    print("⏱ Включён TCP_USER_TIMEOUT=30с (защита от зависания SOCKS5-handshake)")
+        except (TypeError, ValueError):
+            pass
+
         # Для обычных запросов: быстрый connect, нормальный write
         request = HTTPXRequest(
             connection_pool_size=8,
@@ -124,6 +149,7 @@ async def main() -> None:
             write_timeout=30.0,
             pool_timeout=15.0,
             proxy=proxy_url,
+            **_httpx_kwargs,
         )
         # Для long-polling: read_timeout должен быть > polling timeout Telegram (30с)
         get_updates_request = HTTPXRequest(
@@ -133,6 +159,7 @@ async def main() -> None:
             write_timeout=30.0,
             pool_timeout=15.0,
             proxy=proxy_url,
+            **_httpx_kwargs,
         )
 
         if proxy_url:

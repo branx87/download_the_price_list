@@ -15,6 +15,138 @@ _TZ = ZoneInfo(os.getenv('TZ', 'Europe/Moscow'))
 logger = logging.getLogger(__name__)
 
 
+# ─── Надёжная доставка уведомлений ───────────────────────────────────────────
+# Telegram-запросы идут через httpx (внутри python-telegram-bot) и иногда
+# рвутся на прокси/сети: httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError.
+# Это НЕ ошибка бизнес-логики — это обрыв транспорта. Поэтому уведомления
+# отправляем с ретраями и backoff, а ошибку доставки отделяем от ошибки
+# самой синхронизации (иначе в Telegram прилетает вводящее в заблуждение
+# «Ошибка авто-ERP», хотя данные в БД уже обновились).
+
+_NOTIFY_MAX_ATTEMPTS = 3
+_NOTIFY_BACKOFF_BASE = 2.0  # секунды: 2, 4, 8
+# Жёсткий дедлайн на ОДНУ попытку отправки.
+# Нужен потому, что httpx read_timeout НЕ применяется к SOCKS5-handshake
+# (httpcore/_async/socks_proxy.py: _init_socks5_connection) — при недоступном
+# прокси соединение висит до TCP-таймаута ОС (~15-17 мин на Linux) и блокирует
+# event loop, т.е. весь бот. wait_for ставит свою границу поверх этого.
+_NOTIFY_HARD_TIMEOUT = 45.0
+
+
+def _is_transport_error(exc: Exception) -> bool:
+    """True, если исключение — обрыв транспорта (повторять имеет смысл).
+
+    Иерархия httpx: TransportError → {TimeoutException, NetworkError, ProtocolError}
+    TimeoutException и NetworkError — РАЗНЫЕ ветки, поэтому берём корневой
+    TransportError как catch-all, а конкретные классы — для читаемости.
+
+    Классы собираем через getattr + фильтр None: набор имён в httpx менялся
+    между версиями, и обращение к отсутствующему атрибуту не должно ронять
+    проверку (иначе потеряется и ретрай, и диагностика).
+    """
+    # asyncio.TimeoutError — наш жёсткий дедлайн (Python 3.11+: это же TimeoutError)
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    # httpx/requests импортируем лениво — чтобы модуль грузился и без них
+    transport_types: list = []
+    try:
+        import httpx
+        for name in (
+            'TransportError',   # catch-all: Read/Connect/Timeout/Protocol
+            'ReadError',
+            'ConnectError',
+            'ConnectTimeout',
+            'ReadTimeout',
+            'WriteTimeout',
+            'PoolTimeout',
+            'RemoteProtocolError',
+            'NetworkError',
+            'TimeoutException',
+        ):
+            cls = getattr(httpx, name, None)
+            if isinstance(cls, type) and issubclass(cls, BaseException):
+                transport_types.append(cls)
+    except ImportError:
+        pass
+    try:
+        import requests
+        for name in ('ConnectionError', 'Timeout'):
+            cls = getattr(requests.exceptions, name, None)
+            if isinstance(cls, type) and issubclass(cls, BaseException):
+                transport_types.append(cls)
+    except (ImportError, AttributeError):
+        pass
+    return bool(transport_types) and isinstance(exc, tuple(transport_types))
+
+
+def _is_erp_transport_error(exc: Exception) -> bool:
+    """True, если ошибка — обрыв связи именно с 1С-ERP (requests-уровень)."""
+    try:
+        import requests
+    except ImportError:
+        return False
+    return isinstance(exc, (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ChunkedEncodingError,
+    ))
+
+
+async def _send_telegram_safe(
+    bot,
+    chat_id,
+    text: str,
+    attempts: int = _NOTIFY_MAX_ATTEMPTS,
+    hard_timeout: float = _NOTIFY_HARD_TIMEOUT,
+) -> bool:
+    """Отправляет сообщение в Telegram с ретраями на транспортных ошибках.
+
+    Каждая попытка ограничена `hard_timeout` через asyncio.wait_for — это
+    спасает от зависания на SOCKS5-handshake, где httpx read_timeout не работает
+    и соединение висит до TCP-таймаута ОС (наблюдалось ~17 минут).
+
+    Возвращает True, если сообщение доставлено, False — если все попытки исчерпаны.
+    Транспортные ошибки (ReadError/ConnectError/Timeout) повторяем с backoff;
+    остальные (например, TelegramError 400) — нет, они не пройдут.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await asyncio.wait_for(
+                bot.send_message(chat_id=chat_id, text=text),
+                timeout=hard_timeout,
+            )
+            if attempt > 1:
+                logger.info("[SCHEDULER] Уведомление доставлено с %d-й попытки", attempt)
+            return True
+        except asyncio.TimeoutError:
+            last_exc = asyncio.TimeoutError(
+                f"превышен дедлайн {hard_timeout:.0f}с на отправку (вероятно, завис SOCKS5-handshake)"
+            )
+            logger.warning(
+                "[SCHEDULER] Таймаут доставки уведомления (%.0fс), попытка %d/%d",
+                hard_timeout, attempt, attempts,
+            )
+            if attempt == attempts:
+                break
+            await asyncio.sleep(_NOTIFY_BACKOFF_BASE * (2 ** (attempt - 1)))
+            continue
+        except Exception as e:
+            last_exc = e
+            if not _is_transport_error(e) or attempt == attempts:
+                break
+            delay = _NOTIFY_BACKOFF_BASE * (2 ** (attempt - 1))
+            logger.warning(
+                "[SCHEDULER] Ошибка доставки уведомления (%s), попытка %d/%d, повтор через %.0fс",
+                type(e).__name__, attempt, attempts, delay,
+            )
+            await asyncio.sleep(delay)
+
+    logger.error("[SCHEDULER] Уведомление не доставлено после %d попыток: %s",
+                 attempts, last_exc, exc_info=True)
+    return False
+
+
 def register_jobs(app: Application) -> None:
     """Регистрирует все периодические задачи в JobQueue бота."""
     jq = app.job_queue
@@ -68,10 +200,18 @@ def register_jobs(app: Application) -> None:
 # ---------------------------------------------------------------------------
 
 async def _job_erp_sync(context) -> None:
-    """Периодическая синхронизация ERP с уведомлением в Telegram."""
+    """Периодическая синхронизация ERP с уведомлением в Telegram.
+
+    Разделены две независимые фазы:
+      1. Сама синхронизация (запись в БД) — тут ловим ошибки бизнес-логики/1С.
+      2. Доставка отчёта в Telegram — тут ловим обрывы транспорта (httpx.*).
+    Раньше всё было в одном try, из-за чего обрыв сети до Telegram
+    выглядел как «Ошибка авто-ERP», хотя данные уже записались в БД.
+    """
     chat_id = context.job.chat_id
     logger.info("[SCHEDULER] Запуск ERP-синхронизации...")
 
+    # ── Фаза 1: сама синхронизация ─────────────────────────────────────────
     try:
         from adapters.erp.erp_client import ErpClient
         from adapters.database.sql_repository import SqlRepository
@@ -114,15 +254,40 @@ async def _job_erp_sync(context) -> None:
             if normalized:
                 lines.append(f"🔤 Нормализовано 'Цена по запросу': {normalized}")
 
-        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
-        logger.info("[SCHEDULER] Отчёт отправлен: added=%s, linked=%s", result.added, result.updated)
+        report = "\n".join(lines)
 
     except Exception as e:
-        logger.error("[SCHEDULER] Ошибка ERP: %s", e, exc_info=True)
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка авто-ERP: {str(e)[:300]}")
-        except Exception:
-            pass
+        # Фаза 1 упала — тут честно говорим, что именно сломалось.
+        logger.error("[SCHEDULER] Ошибка ERP-синхронизации: %s", e, exc_info=True)
+        err_type = type(e).__name__
+        detail = str(e)[:250] or 'без описания'
+        if _is_erp_transport_error(e):
+            detail = (
+                f"Нет связи с 1С-ERP ({settings.ERP_BASE_URL}). "
+                f"Проверьте ERP_BASE_URL и доступность сервиса."
+            )
+        await _send_telegram_safe(
+            context.bot, chat_id,
+            f"❌ <b>Ошибка ERP-синхронизации</b>\n\n"
+            f"<b>{err_type}</b>\n{detail}",
+        )
+        return
+
+    # ── Фаза 2: доставка отчёта ────────────────────────────────────────────
+    delivered = await _send_telegram_safe(context.bot, chat_id, report)
+    if delivered:
+        logger.info("[SCHEDULER] Отчёт отправлен: added=%s, linked=%s", result.added, result.updated)
+    else:
+        # Отчёт не доехал, но данные в БД обновились — сообщаем об этом отдельно
+        # и обязательно логируем содержимое, чтобы ничего не потерялось.
+        logger.error("[SCHEDULER] Отчёт НЕ доставлен. Содержимое:\n%s", report)
+        await _send_telegram_safe(
+            context.bot, chat_id,
+            "⚠️ <b>ERP-синхронизация выполнена, но отчёт не доставлен</b>\n\n"
+            "Обрыв связи с Telegram API (httpx). Данные в БД обновлены.\n"
+            f"Добавлено: {result.added}, привязано: {result.updated}.\n"
+            "Подробности — в logs/sync.log",
+        )
 
 
 async def _job_sync_all(context) -> None:
@@ -130,7 +295,10 @@ async def _job_sync_all(context) -> None:
     chat_id = context.job.chat_id
     logger.info("[SCHEDULER] Запуск еженедельной синхронизации прайсов...")
 
-    await context.bot.send_message(chat_id=chat_id, text="🔄 Запуск еженедельной синхронизации прайсов...")
+    await _send_telegram_safe(
+        context.bot, chat_id,
+        "🔄 Запуск еженедельной синхронизации прайсов...",
+    )
 
     vendors = ['KEAZ', 'ОВЕН', 'EKF', 'IEK', 'DKC', 'CHINT']
     results_lines = []
@@ -195,5 +363,8 @@ async def _job_sync_all(context) -> None:
     if len(report) > 4000:
         report = report[:3900] + "\n\n... (обрезано)"
 
-    await context.bot.send_message(chat_id=chat_id, text=report)
-    logger.info("[SCHEDULER] Еженедельная синхронизация завершена")
+    delivered = await _send_telegram_safe(context.bot, chat_id, report)
+    if delivered:
+        logger.info("[SCHEDULER] Еженедельная синхронизация завершена")
+    else:
+        logger.error("[SCHEDULER] Еженедельный отчёт НЕ доставлен. Содержимое:\n%s", report)
